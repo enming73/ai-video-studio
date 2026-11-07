@@ -1,9 +1,10 @@
-# AI Video Studio v0.9.0 + VBench shared Provider Core
+# AI Video Studio v0.9.1 + VBench shared Provider Core
 
-This repository contains Studio v0.9.0, VBench, and their shared provider core.
+This repository contains Studio v0.9.1, VBench, and their shared provider core.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.9.0 guide](README-v0.9.0.md) for offline Director
-analysis, [the v0.8.1 guide](README-v0.8.1.md) for preview and
+the existing CLI. See [the v0.9.1 guide](README-v0.9.1.md) for Director vision
+review, [the v0.9.0 guide](README-v0.9.0.md) for offline Director analysis,
+[the v0.8.1 guide](README-v0.8.1.md) for preview and
 export, [the v0.8 guide](README-v0.8.md) for the editable
 timeline, [the v0.7 guide](README-v0.7.md) for the original editor, and
 [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
@@ -50,6 +51,28 @@ Reports and frames are saved under
 judgments; a technical pass does not guarantee storyboard or character
 consistency. See [the v0.9.0 guide](README-v0.9.0.md) for thresholds, report
 statuses and API endpoints.
+
+### Optional Director vision review
+
+Using an existing offline report, a vision model compares ordered frames with
+each shot's storyboard prompt and assesses character appearance, scene, action
+evidence and visible quality. It recommends `keep`, `manual_review`, or
+`regenerate_candidate`; it does not regenerate video or change selected assets.
+
+```bash
+# From ai-video-studio; REPORT_ID comes from director-reports.
+uv run studio director-review PROJECT_ID REPORT_ID --model gpt-4o-mini
+# Explicitly authorize paid requests after configuring OPENAI_API_KEY:
+uv run --env-file .env studio director-review PROJECT_ID REPORT_ID --model gpt-4o-mini --live --budget 1.00 --per-shot-ceiling 0.15
+```
+
+The default is a dry run with no API calls. The per-shot ceiling is a
+user-supplied planning reservation, not a guarantee of actual charges. Live
+reviews with attempted shots are saved independently under
+`studio-data/PROJECT_ID/director-reviews/REVIEW_ID/review.json` (or
+`STUDIO_HOME`). Still frames cannot prove continuous action, and model results
+require human review. See [the v0.9.1 guide](README-v0.9.1.md) for budget,
+configuration and report details.
 
 ## Local visual editor
 

@@ -283,3 +283,20 @@ def director_analyze_cmd(project_id: str, frames: int = typer.Option(3,min=1,max
 def director_reports_cmd(project_id: str):
     from . import director
     console.print_json(json.dumps(director.reports(project_id),ensure_ascii=False))
+
+@app.command('director-review')
+def director_review_cmd(project_id: str, report_id: str,
+                        model: str = typer.Option('gpt-4o-mini',help='Vision-capable OpenAI-compatible model'),
+                        live: bool = typer.Option(False,help='Explicitly authorize paid vision API requests'),
+                        budget: float = typer.Option(0.0,help='Maximum reserved USD budget'),
+                        per_shot_ceiling: float = typer.Option(0.10,help='Conservative estimated USD cost per shot'),
+                        base_url: str = typer.Option(None,help='OpenAI-compatible API base URL'),
+                        shot: list[int] = typer.Option(None,'--shot',help='Repeat to select specific shots')):
+    """Preview cost or run opt-in visual review; never regenerates video."""
+    from . import director_vision
+    try:
+        result=director_vision.review(project_id,report_id,model,base_url,live,budget,
+                                      per_shot_ceiling,shot or None)
+        console.print_json(json.dumps(result,ensure_ascii=False))
+    except (ValueError,RuntimeError) as exc:
+        console.print(f'[red]{exc}[/red]'); raise typer.Exit(1)
