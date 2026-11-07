@@ -1,7 +1,9 @@
-# AI Video Studio v0.6.2 + VBench shared Provider Core
+# AI Video Studio v0.7 + VBench shared Provider Core
 
-This repository contains the Studio v0.6.2 codebase, VBench, and their shared
-provider core. See [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
+This repository contains Studio v0.7, VBench, and their shared provider core.
+Studio includes a local React/Vite visual editor backed by FastAPI, alongside
+the existing CLI. See [the v0.7 guide](ai-video-studio/README-v0.7.md) for the
+editor and [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
 ducking and subtitle fonts; [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
 [README-v0.6.md](README-v0.6.md) for sound post-production, and
 [README-v0.5.md](README-v0.5.md) for the asset registry and timeline. The
@@ -10,7 +12,7 @@ legacy workflows and caveats below originated in v0.2.
 ## Layout
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
-- `ai-video-studio/`: Studio CLI with cloud task persistence and mock mode
+- `ai-video-studio/`: Studio CLI and local visual editor with cloud task persistence and mock mode
 
 ## Install
 ```bash
@@ -21,6 +23,33 @@ Both projects use editable `../video-provider-core` uv source. Keep the sibling 
 Use `ai-video-studio/.env.example` as a template for local configuration; do not
 commit actual credentials. Back up `studio-data` separately, especially paid
 assets and the database, before migrations or changing installations.
+
+## Local visual editor
+
+The v0.7 editor lets you browse existing projects, preview shots, select
+registered original or I2V assets, and add, audition or remove sound effects
+on a timeline. It reuses the existing project database and does not initiate
+paid AI generation calls. Rendering and paid generation remain CLI workflows.
+
+Start the API and the Vite development server in separate terminals:
+
+```bash
+cd ai-video-studio
+uv sync --extra dev --extra web
+uv run studio web --port 8765
+```
+
+```bash
+cd ai-video-studio/web
+npm install
+npm run dev
+```
+
+Open <http://127.0.0.1:5173>. The Vite server proxies API requests to port
+8765. The API has no authentication: keep it local and do not expose it to the
+Internet. Audio files must be accessible on the backend machine. Preserve
+`studio-data` when upgrading, or point `STUDIO_HOME` to the existing data.
+See [the v0.7 guide](ai-video-studio/README-v0.7.md) for details and limitations.
 
 ## Tests
 ```bash
