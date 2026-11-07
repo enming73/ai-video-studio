@@ -1,7 +1,8 @@
-# AI Video Studio v0.6.1 + VBench shared Provider Core
+# AI Video Studio v0.6.2 + VBench shared Provider Core
 
-This repository contains the Studio v0.6.1 codebase, VBench, and their shared
-provider core. See [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
+This repository contains the Studio v0.6.2 codebase, VBench, and their shared
+provider core. See [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
+ducking and subtitle fonts; [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
 [README-v0.6.md](README-v0.6.md) for sound post-production, and
 [README-v0.5.md](README-v0.5.md) for the asset registry and timeline. The
 legacy workflows and caveats below originated in v0.2.
@@ -48,9 +49,29 @@ uv run studio export-film PROJECT_ID --source selected --burn-subtitles
 `narration-attach` integrates the generated audio and subtitles into the
 soundtrack while preserving existing music and ambience settings. FFmpeg is
 required; burning subtitles requires a build with libass and re-encodes video.
-Subtitles follow shot boundaries rather than individual words. The sound mixer
-uses fixed gains rather than voice-aware ducking. See the versioned guides for
-dry-run commands, TTS duration limits, and export options.
+Subtitles follow shot boundaries rather than individual words. See the versioned
+guides for dry-run commands, TTS duration limits, and export options.
+
+### Audio events, ducking and Chinese subtitles
+
+Add existing sound-effect files to an independent timeline with a start time,
+duration, gain and optional fades. The files are referenced, not copied, so
+keep them in place. List events to find IDs for removal.
+
+```bash
+uv run studio audio-add PROJECT_ID --file /path/to/bird.wav --at 12.5 --duration 2.5 --gain 0.65 --fade-in 0.1 --fade-out 0.3
+uv run studio audio-list PROJECT_ID
+uv run studio audio-remove PROJECT_ID EVENT_ID
+STUDIO_SUBTITLE_FONT='Noto Sans CJK SC' STUDIO_SUBTITLE_SIZE=24 \
+  uv run studio export-film PROJECT_ID --source selected --burn-subtitles --ducking
+```
+
+`--ducking` is optional and experimental: FFmpeg `sidechaincompress` lowers
+music in response to narration only when both tracks are configured. Subtitle
+font defaults to `Noto Sans CJK SC` at size 24; install a suitable font on the
+system or configure another with `STUDIO_SUBTITLE_FONT`. Subtitle size must be
+between 8 and 96. Peak limiting and loudness normalization are not implemented;
+avoid excessive combined gains. See [README-v0.6.2.md](README-v0.6.2.md).
 
 ## Studio mock
 ```bash
