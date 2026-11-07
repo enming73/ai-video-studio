@@ -1,9 +1,10 @@
-# AI Video Studio v0.5 + VBench shared Provider Core
+# AI Video Studio v0.6.1 + VBench shared Provider Core
 
-This repository contains the Studio v0.5 codebase, VBench, and their shared
-provider core. See [README-v0.5.md](README-v0.5.md) for the current asset
-registry and timeline features; the other versioned READMEs document earlier
-releases. The legacy workflows and caveats below originated in v0.2.
+This repository contains the Studio v0.6.1 codebase, VBench, and their shared
+provider core. See [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
+[README-v0.6.md](README-v0.6.md) for sound post-production, and
+[README-v0.5.md](README-v0.5.md) for the asset registry and timeline. The
+legacy workflows and caveats below originated in v0.2.
 
 ## Layout
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
@@ -25,6 +26,31 @@ assets and the database, before migrations or changing installations.
 cd ai-video-studio && uv run --extra dev pytest -q
 cd ../vbench && uv run --extra test pytest -q
 ```
+
+## Narration, sound and subtitles
+
+On an existing project, generate an editable per-shot narration script, then
+produce voice audio and shot-aligned SRT subtitles. Planning and TTS are dry
+runs unless `--live` is supplied; live requests may incur provider charges.
+Configure the LLM and TTS credentials as described in
+[README-v0.6.1.md](README-v0.6.1.md), and review the script before synthesis.
+
+```bash
+cd ai-video-studio
+uv run --env-file .env studio narration-plan PROJECT_ID --language zh-CN --model gpt-4o-mini --live
+uv run studio narration-show PROJECT_ID
+# Edit studio-data/PROJECT_ID/narration/script.json before TTS.
+uv run --env-file .env studio narration-tts PROJECT_ID --voice alloy --model gpt-4o-mini-tts --live
+uv run studio narration-attach PROJECT_ID
+uv run studio export-film PROJECT_ID --source selected --burn-subtitles
+```
+
+`narration-attach` integrates the generated audio and subtitles into the
+soundtrack while preserving existing music and ambience settings. FFmpeg is
+required; burning subtitles requires a build with libass and re-encodes video.
+Subtitles follow shot boundaries rather than individual words. The sound mixer
+uses fixed gains rather than voice-aware ducking. See the versioned guides for
+dry-run commands, TTS duration limits, and export options.
 
 ## Studio mock
 ```bash
