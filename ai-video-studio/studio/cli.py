@@ -205,11 +205,30 @@ def captions_draft_cmd(project_id: str, output: str = None):
     try: console.print(f"Draft subtitles: {sound.subtitles_from_shots(project_id,output)}")
     except ValueError as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
 
+@app.command("audio-add")
+def audio_add_cmd(project_id: str, file: str, at: float, duration: float = None,
+                  gain: float = 1.0, fade_in: float = 0.0, fade_out: float = 0.0):
+    from . import sound
+    try: console.print_json(json.dumps(sound.audio_add(project_id,file,at,duration,gain,fade_in,fade_out),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
+
+@app.command("audio-list")
+def audio_list_cmd(project_id: str):
+    from . import sound
+    console.print_json(json.dumps(sound.audio_list(project_id),ensure_ascii=False))
+
+@app.command("audio-remove")
+def audio_remove_cmd(project_id: str, event_id: str):
+    from . import sound
+    try: console.print_json(json.dumps(sound.audio_remove(project_id,event_id),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
+
 @app.command("export-film")
 def export_film_cmd(project_id: str, video: str = None, output: str = None,
-                    source: str = "selected", burn_subtitles: bool = False):
+                    source: str = "selected", burn_subtitles: bool = False,
+                    ducking: bool = False):
     from . import sound
-    try: console.print(f"Exported: {sound.export(project_id,video,output,source,burn_subtitles)}")
+    try: console.print(f"Exported: {sound.export(project_id,video,output,source,burn_subtitles,ducking)}")
     except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
 
 @app.command('narration-plan')

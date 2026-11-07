@@ -1,6 +1,7 @@
 """v0.6 non-destructive audio, subtitles and final export. No paid API calls."""
 from __future__ import annotations
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -59,6 +60,43 @@ def config(pid):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def _events_path(pid):
+    return core.HOME/pid/'audio-events.json'
+
+
+def audio_list(pid):
+    _duration(pid)
+    path=_events_path(pid)
+    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else []
+
+
+def audio_add(pid, file, at, duration=None, gain=1.0, fade_in=0.0, fade_out=0.0):
+    total=_duration(pid)
+    path=_valid_file(file)
+    at=float(at)
+    if not 0<=at<total: raise ValueError('Event start must be within the project')
+    if duration is None: duration=min(_probe(path),total-at)
+    duration=float(duration)
+    if not 0<duration<=total-at+0.001: raise ValueError('Event exceeds project duration')
+    if not 0<=gain<=3: raise ValueError('Gain must be between 0 and 3')
+    if min(fade_in,fade_out)<0 or fade_in+fade_out>duration: raise ValueError('Invalid event fades')
+    events=audio_list(pid)
+    event={'id':uuid.uuid4().hex[:10],'file':str(path),'at':at,'duration':duration,
+           'gain':float(gain),'fade_in':float(fade_in),'fade_out':float(fade_out)}
+    events.append(event)
+    target=_events_path(pid);target.parent.mkdir(parents=True,exist_ok=True)
+    target.write_text(json.dumps(events,indent=2,ensure_ascii=False),encoding='utf-8')
+    return event
+
+
+def audio_remove(pid, event_id):
+    events=audio_list(pid)
+    remaining=[e for e in events if e['id']!=event_id]
+    if len(remaining)==len(events): raise ValueError('Unknown audio event')
+    _events_path(pid).write_text(json.dumps(remaining,indent=2,ensure_ascii=False),encoding='utf-8')
+    return remaining
+
+
 def _srt_timestamp(sec):
     ms=round(sec*1000)
     h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
@@ -87,10 +125,14 @@ def subtitles_from_shots(pid, output=None):
 def _subtitle_filter(path):
     # FFmpeg filtergraph escaping: path is quoted for subtitles filename option.
     value=str(path).replace('\\','\\\\').replace(':','\\:').replace("'", "\\'").replace('[','\\[').replace(']','\\]').replace(',','\\,')
-    return "subtitles=filename='"+value+"'"
+    font=os.getenv('STUDIO_SUBTITLE_FONT','Noto Sans CJK SC')
+    size=int(os.getenv('STUDIO_SUBTITLE_SIZE','24'))
+    if not 8<=size<=96: raise ValueError('Invalid subtitle font size')
+    if any(c in font for c in "',:;\\[]"): raise ValueError('Invalid subtitle font name')
+    return "subtitles=filename='"+value+"':force_style='FontName="+font+",FontSize="+str(size)+",Outline=2,Shadow=1'"
 
 
-def export(pid, video=None, output=None, source='selected', burn_subtitles=False):
+def export(pid, video=None, output=None, source='selected', burn_subtitles=False, ducking=False):
     """Use an existing timeline render or build a new one; never overwrite input/output."""
     duration=_duration(pid)
     cfg=config(pid)
@@ -106,14 +148,38 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
     out.parent.mkdir(parents=True,exist_ok=True)
     inputs=['-i',str(source_video)]
     filters=[];audio_labels=[];idx=1
+    tracks={}
     for key,gain in [('narration','narration_gain'),('music','music_gain'),('ambience','ambience_gain')]:
         if not cfg.get(key): continue
-        path=_valid_file(cfg[key]);inputs+=['-stream_loop','-1' if key!='narration' else '0','-i',str(path)]
+        path=_valid_file(cfg[key])
+        inputs+=['-stream_loop','-1' if key!='narration' else '0','-i',str(path)]
         fade=float(cfg['fade_seconds'])
-        af=f'[{idx}:a]aresample=48000,volume={float(cfg[gain])},atrim=duration={duration},asetpts=PTS-STARTPTS'
+        af=f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,volume={float(cfg[gain])},atrim=duration={duration},asetpts=PTS-STARTPTS'
         if key!='narration' and fade>0:
             af+=f',afade=t=in:st=0:d={fade},afade=t=out:st={max(0,duration-fade)}:d={fade}'
-        label=f'a{idx}';filters.append(af+f'[{label}]');audio_labels.append(f'[{label}]');idx+=1
+        label=f'a{idx}';filters.append(af+f'[{label}]');tracks[key]=label;idx+=1
+    if ducking and 'music' in tracks and 'narration' in tracks:
+        # Split narration: one copy drives sidechain compression, one stays audible.
+        filters.append(f'[{tracks["narration"]}]asplit=2[narration_main][narration_side]')
+        filters.append(f'[{tracks["music"]}][narration_side]sidechaincompress=threshold=0.03:ratio=8:attack=25:release=400[music_ducked]')
+        tracks['narration']='narration_main'
+        tracks['music']='music_ducked'
+    audio_labels.extend(f'[{v}]' for v in tracks.values())
+    events=audio_list(pid)
+    for event in events:
+        path=_valid_file(event['file'])
+        at=float(event['at']);length=float(event['duration'])
+        if not 0<=at<duration or length<=0 or at+length>duration+0.001:
+            raise ValueError(f'Invalid audio event timing: {event["id"]}')
+        gain=float(event['gain']);fi=float(event.get('fade_in',0));fo=float(event.get('fade_out',0))
+        if not 0<=gain<=3 or min(fi,fo)<0 or fi+fo>length:
+            raise ValueError(f'Invalid audio event gain/fade: {event["id"]}')
+        inputs+=['-i',str(path)]
+        af=f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,volume={gain},atrim=duration={length},asetpts=PTS-STARTPTS'
+        if fi: af+=f',afade=t=in:st=0:d={fi}'
+        if fo: af+=f',afade=t=out:st={length-fo}:d={fo}'
+        af+=f',adelay={round(at*1000)}:all=1[e{idx}]'
+        filters.append(af);audio_labels.append(f'[e{idx}]');idx+=1
     if audio_labels:
         if len(audio_labels)>1:
             filters.append(''.join(audio_labels)+f'amix=inputs={len(audio_labels)}:duration=longest:normalize=0,atrim=duration={duration}[audio]')
@@ -134,7 +200,7 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
         core.run(args)
         if abs(_probe(out)-duration)>0.5: raise RuntimeError('Unexpected output duration')
         manifest={'project_id':pid,'video':str(source_video),'output':str(out),
-                  'config':cfg,'burn_subtitles':burn_subtitles,'duration':duration}
+                  'config':cfg,'audio_events':events,'ducking':ducking,'burn_subtitles':burn_subtitles,'duration':duration}
         out.with_suffix('.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding='utf-8')
         return out
     except Exception:
