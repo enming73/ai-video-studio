@@ -1,9 +1,10 @@
 # AI Video Studio + VBench shared Provider Core
 
 This repository contains Studio, VBench, and their shared provider core. The
-v0.9.4 increment adds offline evidence for reviewing shot-to-shot continuity.
+v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.9.4 guide](README-v0.9.4.md) for continuity
+the existing CLI. See [the v0.9.5 guide](README-v0.9.5.md) for visual continuity
+review, [the v0.9.4 guide](README-v0.9.4.md) for offline continuity
 review, [the v0.9.3 guide](README-v0.9.3.md) for production,
 [the v0.9.2 guide](README-v0.9.2.md) for the Director
 Workspace, [the v0.9.1 guide](README-v0.9.1.md) for Director vision
@@ -116,6 +117,33 @@ Source videos, selections, and existing Director reviews are not changed. This
 is local evidence for human review: it does not call paid AI APIs, automatically
 judge continuity, or apply the suggested fixes. See
 [the v0.9.4 guide](README-v0.9.4.md) for API endpoints and details.
+
+### Optional visual continuity review
+
+First create an offline continuity report as described above. In **Continuity
+Vision Agent · 语义衔接评审**, select that report, an image-capable
+OpenAI-compatible model, and optionally a comma-separated list of starting
+shot numbers (for example, `2` selects the boundary from shot 2 to shot 3).
+Only ready boundaries with two extracted frames on each side are eligible.
+
+Use **Dry Run（免费）** to preview eligible pairs and the estimated reservation
+without calling an API. To run a paid review, configure `OPENAI_API_KEY` and
+optionally `OPENAI_BASE_URL` on the backend, set the per-pair estimate and
+total budget, then select **授权付费视觉评审** and confirm the dialog. The
+model receives the two storyboard prompts and four boundary frames; do not use
+live review if that material should not be sent to the configured provider.
+
+Results include observations, uncertainty, severity, confidence, and a
+recommendation: `keep`, `manual_review`, `revise_next_opening`,
+`revise_previous_ending`, or `insert_bridge`. An optional proposed next-shot
+prompt can be copied, but is not applied automatically. Each live review is
+saved separately under
+`studio-data/PROJECT_ID/continuity-vision-reviews/REVIEW_ID/review.json` (or
+`STUDIO_HOME`); dry runs do not create a report. Existing videos and selections
+are unchanged. The per-pair ceiling is a user-provided reservation, **not** a
+provider-enforced spending cap; failed requests can still incur charges.
+Four still frames cannot prove continuous action, and model judgments require
+human review. See [the v0.9.5 guide](README-v0.9.5.md) for API details.
 
 ## Local visual editor
 
@@ -298,3 +326,4 @@ describe their release and may have been addressed by later increments.
 | [v0.9.2](README-v0.9.2.md) | React Director workspace and separately saved human decisions. |
 | [v0.9.3](README-v0.9.3.md) | Browser project creation, planning, cost preview and explicitly confirmed background cloud generation. |
 | [v0.9.4](README-v0.9.4.md) | Offline side-by-side shot-boundary evidence and human continuity review. |
+| [v0.9.5](README-v0.9.5.md) | Opt-in visual continuity assessment and proposed prompt revisions with budget estimates. |
