@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.9.4", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.9.5", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -313,3 +313,28 @@ def continuity_frame(pid: str, rid: str, seq: int, side: str, index: int):
     path=Path(frames[index]['file']).resolve()
     if not path.is_relative_to(base) or not path.is_file(): raise HTTPException(404,'Frame unavailable')
     return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+# v0.9.5: opt-in semantic continuity review. Never triggers video generation.
+class ContinuityVisionRequest(BaseModel):
+    report_id: str
+    model: str = 'gpt-4o-mini'
+    live: bool = False
+    budget_usd: float = Field(default=0,ge=0,le=10000)
+    per_pair_ceiling_usd: float = Field(default=0.10,gt=0,le=100)
+    pairs: list[int] | None = None
+
+@app.post('/api/projects/{pid}/director/continuity-vision')
+def continuity_vision_review(pid: str, body: ContinuityVisionRequest):
+    from . import continuity_vision
+    return api_call(continuity_vision.review,pid,body.report_id,body.model,live=body.live,
+                    budget_usd=body.budget_usd,per_pair_ceiling_usd=body.per_pair_ceiling_usd,pairs=body.pairs)
+
+@app.get('/api/projects/{pid}/director/continuity-vision')
+def continuity_vision_reports(pid: str):
+    from . import continuity_vision
+    return api_call(continuity_vision.reports,pid)
+
+@app.get('/api/projects/{pid}/director/continuity-vision/{rid}')
+def continuity_vision_report(pid: str,rid: str):
+    from . import continuity_vision
+    return api_call(continuity_vision.report,pid,rid)
