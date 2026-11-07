@@ -2,12 +2,16 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from uuid import uuid4
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.8.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.8.1", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -99,4 +103,57 @@ def audio_media(pid: str,event_id: str):
     return FileResponse(path,content_disposition_type='inline')
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.8.0'}
+def health(): return {'status':'ok','version':'0.8.1'}
+
+
+# One local FFmpeg job at a time. No shell execution, no user-supplied output path.
+_render_pool = ThreadPoolExecutor(max_workers=1)
+_render_lock = Lock()
+_render_jobs: dict[str, dict] = {}
+
+class RenderRequest(BaseModel):
+    source: str = 'selected'
+    burn_subtitles: bool = False
+    ducking: bool = True
+
+@app.post('/api/projects/{pid}/renders', status_code=202)
+def start_render(pid: str, body: RenderRequest):
+    checked_pid(pid)
+    if body.source not in ('selected','original','i2v','mixed'):
+        raise HTTPException(400,'Invalid source')
+    with _render_lock:
+        if any(j['status'] in ('queued','running') for j in _render_jobs.values()):
+            raise HTTPException(409,'A render is already queued or running')
+        jid=uuid4().hex
+        job={'id':jid,'project_id':pid,'status':'queued','output':None,'error':None,'created':datetime.now(timezone.utc).isoformat()}
+        _render_jobs[jid]=job
+    def work():
+        with _render_lock: job['status']='running'
+        try:
+            out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
+            with _render_lock:
+                job['output']=str(out)
+                job['status']='completed'
+        except Exception as exc:
+            with _render_lock:
+                job['error']=str(exc)
+                job['status']='failed'
+    _render_pool.submit(work)
+    return dict(job)
+
+@app.get('/api/projects/{pid}/renders/{jid}')
+def render_status(pid: str,jid: str):
+    checked_pid(pid)
+    with _render_lock:
+        job=_render_jobs.get(jid)
+        if not job or job['project_id']!=pid: raise HTTPException(404,'Unknown render job')
+        return dict(job)
+
+@app.get('/api/projects/{pid}/renders/{jid}/video')
+def render_video(pid: str,jid: str):
+    job=render_status(pid,jid)
+    if job['status']!='completed': raise HTTPException(409,'Render not completed')
+    path=Path(job['output']).resolve()
+    if not path.is_file() or not path.is_relative_to((core.HOME/pid).resolve()):
+        raise HTTPException(404,'Render missing')
+    return FileResponse(path,media_type='video/mp4',filename=path.name,headers={'Cache-Control':'no-store'})

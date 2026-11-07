@@ -1,8 +1,9 @@
-# AI Video Studio v0.8 + VBench shared Provider Core
+# AI Video Studio v0.8.1 + VBench shared Provider Core
 
-This repository contains Studio v0.8, VBench, and their shared provider core.
+This repository contains Studio v0.8.1, VBench, and their shared provider core.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.8 guide](README-v0.8.md) for the editable
+the existing CLI. See [the v0.8.1 guide](README-v0.8.1.md) for preview and
+export, [the v0.8 guide](README-v0.8.md) for the editable
 timeline, [the v0.7 guide](README-v0.7.md) for the original editor, and
 [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
 ducking and subtitle fonts; [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
@@ -27,19 +28,28 @@ assets and the database, before migrations or changing installations.
 
 ## Local visual editor
 
-The v0.8 editor lets you browse existing projects, preview shots, select
+The v0.8.1 editor lets you browse existing projects, preview shots, select
 registered original or I2V assets, and add, audition or remove sound effects
 on a timeline. It reuses the existing project database and does not initiate
-paid AI generation calls. Rendering and paid generation remain CLI workflows.
+paid AI generation calls. Paid generation remains a CLI workflow.
 
 Select a purple sound-effect clip to edit it. Drag the clip to change its
 start time, drag its right edge to change its duration, or adjust its timing
 and gain in the left inspector. Click the timeline to position the playhead
 within the corresponding shot. Edits are saved to the project's
 `audio-events.json`; undo and redo cover position, duration and gain changes
-and are available only for the current session. Seeking pauses the video;
-continuous cross-shot playback and live composite audio preview are not yet
-implemented.
+and are available only for the current session.
+
+Playback advances to the next shot automatically, and optional SFX preview
+follows the playhead. Shot transitions may pause briefly. Browser SFX preview
+is approximate and excludes narration, music, ambience and ducking; use the
+FFmpeg export to review the final mix.
+
+Start an FFmpeg export in the browser and follow its queued, running, completed
+or failed status; when complete, open or download the film. FFmpeg must be
+installed on the backend machine. Only one export runs at a time; job status
+is stored in memory and is lost on server restart. Progress percentages and
+cancellation are not available.
 
 Start the API and the Vite development server in separate terminals:
 
@@ -59,7 +69,7 @@ Open <http://127.0.0.1:5173>. The Vite server proxies API requests to port
 8765. The API has no authentication: keep it local and do not expose it to the
 Internet. Audio files must be accessible on the backend machine. Preserve
 `studio-data` when upgrading, or point `STUDIO_HOME` to the existing data.
-See [the v0.8 guide](README-v0.8.md) for details and limitations.
+See [the v0.8.1 guide](README-v0.8.1.md) for details and limitations.
 
 ## Tests
 ```bash
