@@ -1,1 +1,1 @@
-{"name":"ai-video-studio-web","version":"0.7.0","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"},"dependencies":{"react":"^18.3.1","react-dom":"^18.3.1","lucide-react":"^0.468.0"},"devDependencies":{"vite":"^6.0.0"}}
+{"name":"ai-video-studio-web","version":"0.8.0","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"},"dependencies":{"react":"^18.3.1","react-dom":"^18.3.1","lucide-react":"^0.468.0"},"devDependencies":{"vite":"^6.0.0"}}

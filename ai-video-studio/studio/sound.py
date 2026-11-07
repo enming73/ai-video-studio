@@ -97,6 +97,30 @@ def audio_remove(pid, event_id):
     return remaining
 
 
+def audio_update(pid, event_id, *, at=None, duration=None, gain=None):
+    """Persist a timeline edit atomically; reject invalid positions before writing."""
+    total = _duration(pid)
+    events = audio_list(pid)
+    event = next((x for x in events if x['id'] == event_id), None)
+    if event is None:
+        raise ValueError('Unknown audio event')
+    start = float(event['at'] if at is None else at)
+    length = float(event['duration'] if duration is None else duration)
+    volume = float(event['gain'] if gain is None else gain)
+    if not 0 <= start < total or not 0 < length <= total - start + 0.001:
+        raise ValueError('Audio event exceeds project duration')
+    if not 0 <= volume <= 3:
+        raise ValueError('Gain must be between 0 and 3')
+    if float(event.get('fade_in', 0)) + float(event.get('fade_out', 0)) > length:
+        raise ValueError('Duration is shorter than audio fades')
+    event.update(at=round(start, 3), duration=round(length, 3), gain=round(volume, 3))
+    target = _events_path(pid)
+    temp = target.with_suffix('.tmp')
+    temp.write_text(json.dumps(events, indent=2, ensure_ascii=False), encoding='utf-8')
+    temp.replace(target)
+    return event
+
+
 def _srt_timestamp(sec):
     ms=round(sec*1000)
     h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
