@@ -180,3 +180,60 @@ def render_timeline_cmd(project_id: str, source: str = "selected", output: str =
         console.print(f"Rendered: {timeline.render(project_id,output,source)}")
     except (ValueError,RuntimeError) as e:
         console.print(f"[red]{e}[/red]"); raise typer.Exit(1)
+
+
+@app.command("soundtrack-set")
+def soundtrack_set_cmd(project_id: str, narration: str = None, music: str = None,
+                       ambience: str = None, subtitles: str = None,
+                       narration_gain: float = 1.0, music_gain: float = 0.16,
+                       ambience_gain: float = 0.20, fade_seconds: float = 1.5):
+    from . import sound
+    try:
+        console.print_json(json.dumps(sound.configure(project_id,narration,music,ambience,subtitles,
+            narration_gain,music_gain,ambience_gain,fade_seconds),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e:
+        console.print(f"[red]{e}[/red]");raise typer.Exit(1)
+
+@app.command("soundtrack-show")
+def soundtrack_show_cmd(project_id: str):
+    from . import sound
+    console.print_json(json.dumps(sound.config(project_id),ensure_ascii=False))
+
+@app.command("captions-draft")
+def captions_draft_cmd(project_id: str, output: str = None):
+    from . import sound
+    try: console.print(f"Draft subtitles: {sound.subtitles_from_shots(project_id,output)}")
+    except ValueError as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
+
+@app.command("export-film")
+def export_film_cmd(project_id: str, video: str = None, output: str = None,
+                    source: str = "selected", burn_subtitles: bool = False):
+    from . import sound
+    try: console.print(f"Exported: {sound.export(project_id,video,output,source,burn_subtitles)}")
+    except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
+
+@app.command('narration-plan')
+def narration_plan_cmd(project_id: str, language: str = 'zh-CN', model: str = None,
+                       live: bool = False):
+    from . import narration
+    try: console.print_json(json.dumps(narration.plan(project_id,language,model,live),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
+
+@app.command('narration-show')
+def narration_show_cmd(project_id: str):
+    from . import narration
+    try: console.print_json(json.dumps(narration.show(project_id),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
+
+@app.command('narration-tts')
+def narration_tts_cmd(project_id: str, voice: str = 'alloy', model: str = 'gpt-4o-mini-tts',
+                      live: bool = False, max_chars: int = 1200, force: bool = False):
+    from . import narration
+    try: console.print_json(json.dumps(narration.synthesize(project_id,voice,model,live,max_chars,force),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
+
+@app.command('narration-attach')
+def narration_attach_cmd(project_id: str):
+    from . import narration
+    try: console.print_json(json.dumps(narration.attach(project_id),ensure_ascii=False))
+    except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
