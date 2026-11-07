@@ -115,6 +115,7 @@ class RenderRequest(BaseModel):
     source: str = 'selected'
     burn_subtitles: bool = False
     ducking: bool = True
+    silent_fallback: bool = False
 
 @app.post('/api/projects/{pid}/renders', status_code=202)
 def start_render(pid: str, body: RenderRequest):
@@ -130,7 +131,10 @@ def start_render(pid: str, body: RenderRequest):
     def work():
         with _render_lock: job['status']='running'
         try:
-            out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
+            if body.silent_fallback and not sound._config_path(pid).is_file():
+                out=timeline.render(pid,source=body.source)
+            else:
+                out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
             with _render_lock:
                 job['output']=str(out)
                 job['status']='completed'
@@ -217,6 +221,7 @@ class CreateProjectRequest(BaseModel):
     duration: int = Field(default=60, ge=1, le=600)
     provider: str = Field(default='mock')
     budget: float = Field(default=0.0, ge=0, le=10000)
+    guided: bool = False
 
 class PlanProjectRequest(BaseModel):
     shot_length: int = Field(default=10, ge=1, le=30)
@@ -231,6 +236,9 @@ class GenerateProjectRequest(BaseModel):
 @app.post('/api/production/projects', status_code=201)
 def production_create(body: CreateProjectRequest):
     pid = api_call(core.create,body.prompt,body.duration,body.provider,body.budget)
+    if body.guided:
+        from . import guided_workflow
+        api_call(guided_workflow.create,pid)
     return {'project_id':pid,'project':api_call(core.storyboard,pid)['project']}
 
 @app.post('/api/projects/{pid}/production/plan')
@@ -338,3 +346,6 @@ def continuity_vision_reports(pid: str):
 def continuity_vision_report(pid: str,rid: str):
     from . import continuity_vision
     return api_call(continuity_vision.report,pid,rid)
+
+from .guided_web import router as guided_router
+app.include_router(guided_router)

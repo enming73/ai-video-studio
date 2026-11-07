@@ -63,10 +63,21 @@ def attach(project_id: str, shot_id: str, remote_id: str, confirm: bool = typer.
 
 
 @app.command("smart-plan")
-def smart_plan_cmd(project_id: str, model: str = typer.Option(...), shot_length: int = typer.Option(10),
-                   base_url: str = typer.Option(None)):
+def smart_plan_cmd(project_id: str, model: str = typer.Option(...), shot_length: int = typer.Option(None),
+                   base_url: str = typer.Option(None), live: bool = typer.Option(False),
+                   budget: float = typer.Option(None)):
     try:
-        console.print(f"Planned {core.smart_plan(project_id,shot_length,model,base_url)} LLM-directed shots")
+        from . import guided_storyboard
+        with core.connect() as db:
+            if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (project_id,)).fetchone():
+                raise ValueError('Use the guided workspace for guided projects')
+        if not live:
+            console.print({'mode': 'DRY_RUN', **guided_storyboard.preview(project_id, model, shot_length)})
+            return
+        draft = guided_storyboard.request_plan(project_id, model, budget, confirm_paid=True,
+                                               shot_length=shot_length, base_url=base_url)
+        count = guided_storyboard.save_plan(project_id, model, draft)
+        console.print(f"Planned {count} LLM-directed shots")
     except (ValueError, RuntimeError, Exception) as e:
         console.print(f"[red]{e}[/red]"); raise typer.Exit(1)
 
@@ -129,9 +140,9 @@ def frame_plan_cmd(project_id: str, seq: int):
 
 @app.command("generate-frame")
 def generate_frame_cmd(project_id: str, seq: int, live: bool = False,
-                       model: str = "gpt-image-2.5-sunburst", force: bool = False):
+                       model: str = "gpt-image-2.5-sunburst", force: bool = False, budget: float = None):
     from . import reference_generation as rg
-    try: console.print_json(json.dumps(rg.generate_frame(project_id,seq,live=live,model=model,force=force),ensure_ascii=False))
+    try: console.print_json(json.dumps(rg.generate_frame(project_id,seq,live=live,model=model,force=force,budget_usd=budget),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
 
 @app.command("generate-i2v")
@@ -233,9 +244,9 @@ def export_film_cmd(project_id: str, video: str = None, output: str = None,
 
 @app.command('narration-plan')
 def narration_plan_cmd(project_id: str, language: str = 'zh-CN', model: str = None,
-                       live: bool = False):
+                       live: bool = False, budget: float = None):
     from . import narration
-    try: console.print_json(json.dumps(narration.plan(project_id,language,model,live),ensure_ascii=False))
+    try: console.print_json(json.dumps(narration.plan(project_id,language,model,live,budget_usd=budget),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
 
 @app.command('narration-show')
@@ -246,9 +257,9 @@ def narration_show_cmd(project_id: str):
 
 @app.command('narration-tts')
 def narration_tts_cmd(project_id: str, voice: str = 'alloy', model: str = 'gpt-4o-mini-tts',
-                      live: bool = False, max_chars: int = 1200, force: bool = False):
+                      live: bool = False, max_chars: int = 1200, force: bool = False, budget: float = None):
     from . import narration
-    try: console.print_json(json.dumps(narration.synthesize(project_id,voice,model,live,max_chars,force),ensure_ascii=False))
+    try: console.print_json(json.dumps(narration.synthesize(project_id,voice,model,live,max_chars,force,budget_usd=budget),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
 
 @app.command('narration-attach')

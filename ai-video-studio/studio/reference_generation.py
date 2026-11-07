@@ -1,6 +1,7 @@
 """v0.4.1 opt-in reference image creation and isolated H3 I2V experiments."""
 from __future__ import annotations
 import base64, hashlib, json, mimetypes, os, time
+from uuid import uuid4
 from pathlib import Path
 import httpx
 from . import core, references
@@ -48,7 +49,8 @@ def frame_plan(pid, seq, model=DEFAULT_IMAGE_MODEL):
     digest = hashlib.sha256(json.dumps({'prompt':prompt,'model':model,'references':[hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]},sort_keys=True).encode()).hexdigest()
     return {'project_id':pid,'seq':seq,'model':model,'characters':names,'files':[str(p) for p in paths], 'prompt':prompt,'cache_key':digest,'estimated_cost_usd':None,'existing_first_frame':manifest['shots'].get(str(seq))}
 
-def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=False, client=None):
+def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=False, client=None, budget_usd=None):
+    if live: core.require_paid_budget(budget_usd)
     plan = frame_plan(pid,seq,model)
     if not live: return {'dry_run':True, **plan}
     if plan['existing_first_frame'] and not force:
@@ -66,9 +68,10 @@ def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=Fal
         b64 = data['data'][0]['b64_json']
         raw = base64.b64decode(b64,validate=True)
         if not raw.startswith(b'\x89PNG\r\n\x1a\n'): raise RuntimeError('Image API did not return PNG bytes')
-        target = references._asset_root(pid)/'generated'/f'shot-{seq:03d}-{plan["cache_key"][:16]}.png'
+        target = references._asset_root(pid)/'generated'/f'shot-{seq:03d}-{plan["cache_key"][:16]}-{uuid4().hex}.png'
         target.parent.mkdir(parents=True,exist_ok=True)
-        target.write_bytes(raw)
+        with target.open('xb') as image:
+            image.write(raw)
         saved = references.import_shot(pid,seq,str(target))
         return {'dry_run':False,'image':saved,'generated_file':str(target),'model':model,'characters':plan['characters']}
     finally:
@@ -86,6 +89,9 @@ def i2v_plan(pid, seq):
     return {'model':'MiniMax-H3','content':content,'resolution':'768P','duration':shot['duration'],'ratio':'adaptive'}
 
 def i2v(pid, seq, *, live=False, max_usd=None, client=None):
+    if live:
+        if max_usd is None: raise ValueError('--max-usd required for paid I2V')
+        core.require_paid_budget(max_usd)
     body = i2v_plan(pid,seq)
     # Never expose large base64 image or secrets in dry-run output.
     if not live:

@@ -158,6 +158,10 @@ def _subtitle_filter(path):
 
 def export(pid, video=None, output=None, source='selected', burn_subtitles=False, ducking=False):
     """Use an existing timeline render or build a new one; never overwrite input/output."""
+    if video is not None:
+        with core.connect() as db:
+            if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+                raise ValueError('External video cannot bypass guided shot confirmation')
     duration=_duration(pid)
     cfg=config(pid)
     root=core.HOME/pid
