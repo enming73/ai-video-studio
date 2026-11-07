@@ -1,9 +1,14 @@
-# AI Video Studio v0.2 + VBench shared Provider Core
+# AI Video Studio v0.5 + VBench shared Provider Core
+
+This repository contains the Studio v0.5 codebase, VBench, and their shared
+provider core. See [README-v0.5.md](README-v0.5.md) for the current asset
+registry and timeline features; the other versioned READMEs document earlier
+releases. The legacy workflows and caveats below originated in v0.2.
 
 ## Layout
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
-- `ai-video-studio/`: Studio v0.2 CLI with cloud task persistence and mock mode
+- `ai-video-studio/`: Studio CLI with cloud task persistence and mock mode
 
 ## Install
 ```bash
@@ -11,6 +16,15 @@ cd vbench && uv sync --extra test
 cd ../ai-video-studio && uv sync --extra dev
 ```
 Both projects use editable `../video-provider-core` uv source. Keep the sibling directories together.
+Use `ai-video-studio/.env.example` as a template for local configuration; do not
+commit actual credentials. Back up `studio-data` separately, especially paid
+assets and the database, before migrations or changing installations.
+
+## Tests
+```bash
+cd ai-video-studio && uv run --extra dev pytest -q
+cd ../vbench && uv run --extra test pytest -q
+```
 
 ## Studio mock
 ```bash
