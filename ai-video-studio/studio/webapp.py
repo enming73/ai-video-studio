@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.8.1", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.9.2", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -103,7 +103,7 @@ def audio_media(pid: str,event_id: str):
     return FileResponse(path,content_disposition_type='inline')
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.8.1'}
+def health(): return {'status':'ok','version':'0.9.2'}
 
 
 # One local FFmpeg job at a time. No shell execution, no user-supplied output path.
@@ -183,3 +183,24 @@ def director_frame(pid: str,rid: str,seq: int,index: int):
     allowed=(core.HOME/pid/'director-reports'/rid).resolve()
     if not path.is_relative_to(allowed) or not path.is_file(): raise HTTPException(404,'Frame missing')
     return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+
+# Director Workspace: read existing reviews and store human decisions only.
+class DirectorDecision(BaseModel):
+    action: str
+    note: str = Field(default='', max_length=2000)
+
+@app.get('/api/projects/{pid}/director/reviews')
+def director_review_list(pid: str):
+    from . import director_workspace
+    return api_call(director_workspace.reviews,pid)
+
+@app.get('/api/projects/{pid}/director/reviews/{rid}')
+def director_review_detail(pid: str,rid: str):
+    from . import director_workspace
+    return api_call(director_workspace.review,pid,rid)
+
+@app.put('/api/projects/{pid}/director/reviews/{rid}/shots/{seq}/decision')
+def director_review_decision(pid: str,rid: str,seq: int,body: DirectorDecision):
+    from . import director_workspace
+    return api_call(director_workspace.decide,pid,rid,seq,body.action,body.note)

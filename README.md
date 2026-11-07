@@ -1,8 +1,10 @@
-# AI Video Studio v0.9.1 + VBench shared Provider Core
+# AI Video Studio + VBench shared Provider Core
 
-This repository contains Studio v0.9.1, VBench, and their shared provider core.
+This repository contains Studio, VBench, and their shared provider core. The
+Director Workspace is the v0.9.2 feature increment.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.9.1 guide](README-v0.9.1.md) for Director vision
+the existing CLI. See [the v0.9.2 guide](README-v0.9.2.md) for the Director
+Workspace, [the v0.9.1 guide](README-v0.9.1.md) for Director vision
 review, [the v0.9.0 guide](README-v0.9.0.md) for offline Director analysis,
 [the v0.8.1 guide](README-v0.8.1.md) for preview and
 export, [the v0.8 guide](README-v0.8.md) for the editable
@@ -73,6 +75,28 @@ reviews with attempted shots are saved independently under
 `STUDIO_HOME`). Still frames cannot prove continuous action, and model results
 require human review. See [the v0.9.1 guide](README-v0.9.1.md) for budget,
 configuration and report details.
+
+### Director workspace in React Studio
+
+Start the local editor as described below, select a project, and scroll to
+**Director Agent · 视觉评审工作台**. Select an existing live vision review
+or click **刷新报告** after creating one with the CLI. Dry runs do not create
+reviews for the workspace.
+
+Each reviewed shot displays its source prompt, keyframes, four scores,
+recommendation, findings, uncertainty and any offline warnings. Failed
+reviews display an error instead of scores. Use **定位到镜头** to select the
+corresponding shot in the editor. Choose **保留**, **进一步检查**,
+**不采纳建议**, or **批准重生成（仅记录）**; selecting an action saves it
+along with the current note. For a later note edit, click **保存备注**.
+
+Decisions are stored per review and shot in
+`studio-data/PROJECT_ID/director-reviews/REVIEW_ID/decisions.json` (or
+`STUDIO_HOME`), separately from the original `review.json`. Saving a new
+decision for the same shot replaces its previous decision and note. Approval
+records intent only: it does not call a paid API, queue regeneration, or change
+assets. The workspace reads existing reviews; it does not run vision analysis.
+See [the v0.9.2 guide](README-v0.9.2.md) for its API endpoints.
 
 ## Local visual editor
 
@@ -201,6 +225,28 @@ The DB is migrated additively from v0.1. `STUDIO_HOME` must point to the same or
 
 ## Caveats
 - Budget is a conservative estimated reservation based on a manually verified per-second rate; not a vendor invoice. Failed and ambiguous submissions retain reservations.
-- No automatic retries of ambiguous submissions. No parallel generation or automated QA scoring yet.
+- No automatic retries of ambiguous submissions or parallel generation. Director scores are advisory, not automatic approval.
 - Vendor APIs, model availability, and download hosts may change. Live mode requires verification.
 - Do not upload `.env`, credentials, DB or generated videos.
+
+## Version guide summary
+
+The sections above are the consolidated starting point. Historical guides are
+preserved for detailed commands and release-specific caveats; older limitations
+describe their release and may have been addressed by later increments.
+
+| Guide | Main increment |
+| --- | --- |
+| [v0.3](README-v0.3.md) | LLM storyboard planning, shot editing and normalized rendering; LLM planning can incur separate costs. |
+| [v0.4](README-v0.4.md) | Character references, first-frame imports and keyframe inspection. |
+| [v0.4.1](README-v0.4.1.md) | Opt-in reference-image generation and isolated MiniMax I2V experiment. |
+| [v0.5](README-v0.5.md) | Asset registry, shot selection and non-destructive timeline rendering. |
+| [v0.6](README-v0.6.md) | Local soundtrack mixing, draft subtitles and FFmpeg export. |
+| [v0.6.1](README-v0.6.1.md) | Narration planning, TTS and shot-aligned subtitles. |
+| [v0.6.2](README-v0.6.2.md) | Audio events, experimental ducking and subtitle font settings. |
+| [v0.7](README-v0.7.md) | Local React editor for projects, assets and sound effects. |
+| [v0.8](README-v0.8.md) | Draggable and resizable audio clips, inspector, seek and session undo/redo. |
+| [v0.8.1](README-v0.8.1.md) | Continuous shot preview, approximate SFX audition and browser export. |
+| [v0.9.0](README-v0.9.0.md) | Offline technical checks, evidence frames and historical JSON reports. |
+| [v0.9.1](README-v0.9.1.md) | Opt-in vision review, planning budget and independent review reports. |
+| [v0.9.2](README-v0.9.2.md) | React Director workspace and separately saved human decisions. |
