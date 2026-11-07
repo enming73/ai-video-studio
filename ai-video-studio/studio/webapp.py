@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.9.3", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.9.4", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -283,3 +283,33 @@ def production_job(pid: str,jid: str):
     job=_production_jobs.get(jid)
     if not job or job['project_id']!=pid: raise HTTPException(404,'Job not found')
     return job
+
+# v0.9.4: offline adjacent-shot boundary evidence; no generation calls.
+@app.post('/api/projects/{pid}/director/continuity')
+def continuity_analyze(pid: str):
+    from . import continuity
+    return api_call(continuity.analyze, pid)
+
+@app.get('/api/projects/{pid}/director/continuity')
+def continuity_reports(pid: str):
+    from . import continuity
+    return api_call(continuity.reports, pid)
+
+@app.get('/api/projects/{pid}/director/continuity/{rid}')
+def continuity_report(pid: str, rid: str):
+    from . import continuity
+    return api_call(continuity.report, pid, rid)
+
+@app.get('/api/projects/{pid}/director/continuity/{rid}/boundaries/{seq}/{side}/{index}')
+def continuity_frame(pid: str, rid: str, seq: int, side: str, index: int):
+    from . import continuity
+    if side not in ('in','out') or index not in (0,1): raise HTTPException(400,'Invalid frame selector')
+    data=api_call(continuity.report,pid,rid)
+    boundary=next((b for b in data['boundaries'] if b['from_seq']==seq),None)
+    if not boundary: raise HTTPException(404,'Boundary not found')
+    frames=boundary.get('frames',{}).get(side,[])
+    if index>=len(frames): raise HTTPException(404,'Frame not found')
+    base=(core.HOME/pid/'continuity-reports'/rid).resolve()
+    path=Path(frames[index]['file']).resolve()
+    if not path.is_relative_to(base) or not path.is_file(): raise HTTPException(404,'Frame unavailable')
+    return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})

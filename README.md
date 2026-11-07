@@ -1,9 +1,10 @@
 # AI Video Studio + VBench shared Provider Core
 
 This repository contains Studio, VBench, and their shared provider core. The
-v0.9.3 increment adds browser-based project creation, planning and generation.
+v0.9.4 increment adds offline evidence for reviewing shot-to-shot continuity.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.9.3 guide](README-v0.9.3.md) for production,
+the existing CLI. See [the v0.9.4 guide](README-v0.9.4.md) for continuity
+review, [the v0.9.3 guide](README-v0.9.3.md) for production,
 [the v0.9.2 guide](README-v0.9.2.md) for the Director
 Workspace, [the v0.9.1 guide](README-v0.9.1.md) for Director vision
 review, [the v0.9.0 guide](README-v0.9.0.md) for offline Director analysis,
@@ -98,6 +99,23 @@ decision for the same shot replaces its previous decision and note. Approval
 records intent only: it does not call a paid API, queue regeneration, or change
 assets. The workspace reads existing reviews; it does not run vision analysis.
 See [the v0.9.2 guide](README-v0.9.2.md) for its API endpoints.
+
+### Offline shot continuity review
+
+In the local editor, select a project with at least two storyboard shots and
+selected video assets. In **Continuity Director · 镜头衔接**, click
+**分析相邻镜头（免费）**. FFprobe and FFmpeg sample two frames near the end
+of each shot and two near the start of the next. The workspace shows each pair
+side by side with both prompts, review questions, three possible editing
+strategies, and any missing-asset or extraction warnings. Use the history
+selector to revisit a report or the shot button to select the next shot.
+
+Each run saves its own JSON report and extracted frames under
+`studio-data/PROJECT_ID/continuity-reports/REPORT_ID/` (or `STUDIO_HOME`).
+Source videos, selections, and existing Director reviews are not changed. This
+is local evidence for human review: it does not call paid AI APIs, automatically
+judge continuity, or apply the suggested fixes. See
+[the v0.9.4 guide](README-v0.9.4.md) for API endpoints and details.
 
 ## Local visual editor
 
@@ -279,3 +297,4 @@ describe their release and may have been addressed by later increments.
 | [v0.9.1](README-v0.9.1.md) | Opt-in vision review, planning budget and independent review reports. |
 | [v0.9.2](README-v0.9.2.md) | React Director workspace and separately saved human decisions. |
 | [v0.9.3](README-v0.9.3.md) | Browser project creation, planning, cost preview and explicitly confirmed background cloud generation. |
+| [v0.9.4](README-v0.9.4.md) | Offline side-by-side shot-boundary evidence and human continuity review. |
