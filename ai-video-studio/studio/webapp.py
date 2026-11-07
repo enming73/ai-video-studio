@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.7.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.8.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -61,6 +61,15 @@ def audio(pid: str):
 def add_audio(pid: str, body: AudioEvent):
     return api_call(sound.audio_add,pid,body.file,body.at,body.duration,body.gain,body.fade_in,body.fade_out)
 
+class AudioEdit(BaseModel):
+    at: float | None = Field(default=None, ge=0)
+    duration: float | None = Field(default=None, gt=0)
+    gain: float | None = Field(default=None, ge=0, le=3)
+
+@app.patch('/api/projects/{pid}/audio/{event_id}')
+def edit_audio(pid: str, event_id: str, body: AudioEdit):
+    return api_call(sound.audio_update, pid, event_id, **body.model_dump(exclude_none=True))
+
 @app.delete('/api/projects/{pid}/audio/{event_id}')
 def delete_audio(pid: str,event_id: str):
     return api_call(sound.audio_remove,pid,event_id)
@@ -90,4 +99,4 @@ def audio_media(pid: str,event_id: str):
     return FileResponse(path,content_disposition_type='inline')
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.7.0'}
+def health(): return {'status':'ok','version':'0.8.0'}

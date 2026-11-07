@@ -1,9 +1,10 @@
-# AI Video Studio v0.7 + VBench shared Provider Core
+# AI Video Studio v0.8 + VBench shared Provider Core
 
-This repository contains Studio v0.7, VBench, and their shared provider core.
+This repository contains Studio v0.8, VBench, and their shared provider core.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.7 guide](ai-video-studio/README-v0.7.md) for the
-editor and [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
+the existing CLI. See [the v0.8 guide](README-v0.8.md) for the editable
+timeline, [the v0.7 guide](README-v0.7.md) for the original editor, and
+[README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
 ducking and subtitle fonts; [README-v0.6.1.md](README-v0.6.1.md) for narration and TTS,
 [README-v0.6.md](README-v0.6.md) for sound post-production, and
 [README-v0.5.md](README-v0.5.md) for the asset registry and timeline. The
@@ -26,10 +27,19 @@ assets and the database, before migrations or changing installations.
 
 ## Local visual editor
 
-The v0.7 editor lets you browse existing projects, preview shots, select
+The v0.8 editor lets you browse existing projects, preview shots, select
 registered original or I2V assets, and add, audition or remove sound effects
 on a timeline. It reuses the existing project database and does not initiate
 paid AI generation calls. Rendering and paid generation remain CLI workflows.
+
+Select a purple sound-effect clip to edit it. Drag the clip to change its
+start time, drag its right edge to change its duration, or adjust its timing
+and gain in the left inspector. Click the timeline to position the playhead
+within the corresponding shot. Edits are saved to the project's
+`audio-events.json`; undo and redo cover position, duration and gain changes
+and are available only for the current session. Seeking pauses the video;
+continuous cross-shot playback and live composite audio preview are not yet
+implemented.
 
 Start the API and the Vite development server in separate terminals:
 
@@ -49,7 +59,7 @@ Open <http://127.0.0.1:5173>. The Vite server proxies API requests to port
 8765. The API has no authentication: keep it local and do not expose it to the
 Internet. Audio files must be accessible on the backend machine. Preserve
 `studio-data` when upgrading, or point `STUDIO_HOME` to the existing data.
-See [the v0.7 guide](ai-video-studio/README-v0.7.md) for details and limitations.
+See [the v0.8 guide](README-v0.8.md) for details and limitations.
 
 ## Tests
 ```bash
