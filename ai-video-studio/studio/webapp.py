@@ -79,7 +79,7 @@ def media(pid: str,kind: str,seq: int):
     path=Path(item['file']).resolve()
     # Assets are explicitly registered in SQLite; never accept arbitrary filesystem paths from URL.
     if not path.is_file(): raise HTTPException(404,'Missing asset file')
-    return FileResponse(path,media_type='video/mp4',filename=path.name,content_disposition_type='inline')
+    return FileResponse(path,media_type='video/mp4',filename=path.name,content_disposition_type='inline',headers={'Cache-Control':'no-store, max-age=0'})
 
 @app.get('/api/projects/{pid}/audio-media/{event_id}')
 def audio_media(pid: str,event_id: str):
