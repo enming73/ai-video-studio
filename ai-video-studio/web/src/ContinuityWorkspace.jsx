@@ -1,0 +1,13 @@
+import React,{useEffect,useState} from 'react';
+async function api(path,method='GET'){const r=await fetch('/api'+path,{method});if(!r.ok){const x=await r.json().catch(()=>({detail:r.statusText}));throw Error(x.detail||r.statusText)}return r.json()}
+export default function ContinuityWorkspace({pid,onSelectShot}){
+ const [reports,setReports]=useState([]),[id,setId]=useState(''),[data,setData]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ const base=`/projects/${encodeURIComponent(pid)}/director/continuity`;
+ const refresh=async()=>{if(!pid)return;try{const xs=await api(base);setReports(xs);setId(old=>xs.some(x=>x.report_id===old)?old:xs[0]?.report_id||'');setError('')}catch(e){setError(e.message)}};
+ useEffect(()=>{setId('');setData(null);refresh()},[pid]);
+ useEffect(()=>{if(!id){setData(null);return}api(base+'/'+id).then(setData).catch(e=>setError(e.message))},[pid,id]);
+ const run=async()=>{setBusy(true);try{const x=await api(base,'POST');await refresh();setId(x.report_id);setData(x);setError('')}catch(e){setError(e.message)}finally{setBusy(false)}};
+ return <section className="director-workspace"><div className="director-heading"><h2>🎞 Continuity Director · 镜头衔接</h2><button disabled={!pid||busy} onClick={run}>{busy?'正在提取…':'分析相邻镜头（免费）'}</button></div><p className="muted">提取前一镜结尾和后一镜开头的真实视频帧，供人工判断角色出场、动作及场景连续性。不会调用 AI API 或重生成镜头。</p>{error&&<p className="error">{error}</p>}{reports.length>0&&<label>历史报告 <select value={id} onChange={e=>setId(e.target.value)}>{reports.map(x=><option key={x.report_id} value={x.report_id}>{x.report_id} · {x.boundaries} 组衔接</option>)}</select></label>}
+ {data?.boundaries?.map(b=><article className="director-shot" key={b.from_seq}><div className="director-heading"><h3>镜头 {b.from_seq} → {b.to_seq}</h3><span>{b.status}</span></div><div className="director-grid"><div><b>前一镜结尾</b><p className="muted">{b.from_prompt}</p><div className="director-frames">{(b.frames?.out||[]).map((f,i)=><img key={i} loading="lazy" alt={`镜头${b.from_seq}结尾${i+1}`} src={`/api${base}/${id}/boundaries/${b.from_seq}/out/${i}`}/>)}</div></div><div><b>后一镜开头</b><p className="muted">{b.to_prompt}</p><div className="director-frames">{(b.frames?.in||[]).map((f,i)=><img key={i} loading="lazy" alt={`镜头${b.to_seq}开头${i+1}`} src={`/api${base}/${id}/boundaries/${b.from_seq}/in/${i}`}/>)}</div></div></div>{b.warnings?.length>0&&<p className="error">{b.warnings.join('；')}</p>}<p><b>人工检查</b></p><ul>{b.review_questions.map((q,i)=><li key={i}>{q}</li>)}</ul><p><b>可选修复</b></p><ul>{b.suggested_fixes.map((q,i)=><li key={i}>{q}</li>)}</ul><button onClick={()=>onSelectShot(b.to_seq)}>定位到镜头 {b.to_seq}</button></article>)}
+ </section>
+}
