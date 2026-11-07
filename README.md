@@ -1,8 +1,9 @@
-# AI Video Studio v0.8.1 + VBench shared Provider Core
+# AI Video Studio v0.9.0 + VBench shared Provider Core
 
-This repository contains Studio v0.8.1, VBench, and their shared provider core.
+This repository contains Studio v0.9.0, VBench, and their shared provider core.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.8.1 guide](README-v0.8.1.md) for preview and
+the existing CLI. See [the v0.9.0 guide](README-v0.9.0.md) for offline Director
+analysis, [the v0.8.1 guide](README-v0.8.1.md) for preview and
 export, [the v0.8 guide](README-v0.8.md) for the editable
 timeline, [the v0.7 guide](README-v0.7.md) for the original editor, and
 [README-v0.6.2.md](README-v0.6.2.md) for the audio timeline,
@@ -25,6 +26,30 @@ Both projects use editable `../video-provider-core` uv source. Keep the sibling 
 Use `ai-video-studio/.env.example` as a template for local configuration; do not
 commit actual credentials. Back up `studio-data` separately, especially paid
 assets and the database, before migrations or changing installations.
+
+## Director Agent: offline technical analysis
+
+Analyze the selected video asset for each storyboard shot without paid API
+calls. FFprobe records duration, resolution, codec and frame rate; FFmpeg
+detects black and frozen segments and extracts review frames. The JSON report
+records per-shot evidence, warnings and status. Each analysis creates a
+separate report directory, preserving previous reports and source assets.
+
+Install FFmpeg and FFprobe on the backend machine, then run:
+
+```bash
+cd ai-video-studio
+uv run studio sync-assets PROJECT_ID
+uv run studio director-analyze PROJECT_ID --frames 3
+uv run studio director-reports PROJECT_ID
+```
+
+Reports and frames are saved under
+`studio-data/PROJECT_ID/director-reports/REPORT_ID/` (or under the configured
+`STUDIO_HOME`). These are technical heuristics, not semantic or aesthetic
+judgments; a technical pass does not guarantee storyboard or character
+consistency. See [the v0.9.0 guide](README-v0.9.0.md) for thresholds, report
+statuses and API endpoints.
 
 ## Local visual editor
 

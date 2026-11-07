@@ -157,3 +157,29 @@ def render_video(pid: str,jid: str):
     if not path.is_file() or not path.is_relative_to((core.HOME/pid).resolve()):
         raise HTTPException(404,'Render missing')
     return FileResponse(path,media_type='video/mp4',filename=path.name,headers={'Cache-Control':'no-store'})
+
+@app.post('/api/projects/{pid}/director/analyze')
+def director_analyze(pid: str, frames: int = 3):
+    from . import director
+    return api_call(director.analyze,pid,frames)
+
+@app.get('/api/projects/{pid}/director/reports')
+def director_reports(pid: str):
+    from . import director
+    return api_call(director.reports,pid)
+
+@app.get('/api/projects/{pid}/director/reports/{rid}')
+def director_report(pid: str,rid: str):
+    from . import director
+    return api_call(director.report,pid,rid)
+
+@app.get('/api/projects/{pid}/director/reports/{rid}/shots/{seq}/frames/{index}')
+def director_frame(pid: str,rid: str,seq: int,index: int):
+    from . import director
+    data=api_call(director.report,pid,rid)
+    shot=next((s for s in data['shots'] if s['seq']==seq),None)
+    if not shot or index<0 or index>=len(shot['frames']): raise HTTPException(404,'Frame not found')
+    path=Path(shot['frames'][index]['file']).resolve()
+    allowed=(core.HOME/pid/'director-reports'/rid).resolve()
+    if not path.is_relative_to(allowed) or not path.is_file(): raise HTTPException(404,'Frame missing')
+    return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})

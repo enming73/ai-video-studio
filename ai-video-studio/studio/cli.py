@@ -269,3 +269,17 @@ def web_cmd(host: str = "127.0.0.1", port: int = 8765):
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise typer.BadParameter("Only loopback hosts are supported for this local editor")
     uvicorn.run(web_app, host=host, port=port)
+
+@app.command('director-analyze')
+def director_analyze_cmd(project_id: str, frames: int = typer.Option(3,min=1,max=8),
+                         black: bool = True, freeze: bool = True):
+    """Offline technical video inspection; zero paid API calls."""
+    from . import director
+    try: console.print_json(json.dumps(director.analyze(project_id,frames,black,freeze),ensure_ascii=False))
+    except (ValueError,RuntimeError) as exc:
+        console.print(f'[red]{exc}[/red]'); raise typer.Exit(1)
+
+@app.command('director-reports')
+def director_reports_cmd(project_id: str):
+    from . import director
+    console.print_json(json.dumps(director.reports(project_id),ensure_ascii=False))
