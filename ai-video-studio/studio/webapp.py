@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.9.2", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="AI Video Studio", version="0.9.3", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -103,7 +103,7 @@ def audio_media(pid: str,event_id: str):
     return FileResponse(path,content_disposition_type='inline')
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.9.2'}
+def health(): return {'status':'ok','version':'0.9.3'}
 
 
 # One local FFmpeg job at a time. No shell execution, no user-supplied output path.
@@ -204,3 +204,82 @@ def director_review_detail(pid: str,rid: str):
 def director_review_decision(pid: str,rid: str,seq: int,body: DirectorDecision):
     from . import director_workspace
     return api_call(director_workspace.decide,pid,rid,seq,body.action,body.note)
+
+
+# Production workflow: the browser calls the same core operations as the CLI.
+# No subprocess shell, no paid calls without a separate explicit live request.
+_production_pool = ThreadPoolExecutor(max_workers=1)
+_production_lock = Lock()
+_production_jobs: dict[str, dict] = {}
+
+class CreateProjectRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=5000)
+    duration: int = Field(default=60, ge=1, le=600)
+    provider: str = Field(default='mock')
+    budget: float = Field(default=0.0, ge=0, le=10000)
+
+class PlanProjectRequest(BaseModel):
+    shot_length: int = Field(default=10, ge=1, le=30)
+
+class GenerateProjectRequest(BaseModel):
+    live: bool = False
+    budget: float | None = Field(default=None, ge=0, le=10000)
+    limit: int = Field(default=0, ge=0, le=1000)
+    confirm_paid: bool = False
+    confirmation_project_id: str | None = None
+
+@app.post('/api/production/projects', status_code=201)
+def production_create(body: CreateProjectRequest):
+    pid = api_call(core.create,body.prompt,body.duration,body.provider,body.budget)
+    return {'project_id':pid,'project':api_call(core.storyboard,pid)['project']}
+
+@app.post('/api/projects/{pid}/production/plan')
+def production_plan(pid: str,body: PlanProjectRequest):
+    checked_pid(pid)
+    count=api_call(core.plan,pid,body.shot_length)
+    return {'planned_shots':count,'storyboard':api_call(core.storyboard,pid)}
+
+@app.post('/api/projects/{pid}/production/estimate')
+def production_estimate(pid: str,body: GenerateProjectRequest):
+    checked_pid(pid)
+    # Dry-run is always forced here, regardless of the submitted live flag.
+    return {'estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
+
+def _production_execute(jid: str,pid: str,budget: float,limit: int):
+    with _production_lock:
+        job=_production_jobs[jid]; job['status']='running'
+        try:
+            result=core.generate(pid,live=True,budget=budget,limit=limit)
+            job['result']=result; job['status']='completed'
+        except Exception as exc:
+            job['status']='failed'; job['error']=str(exc)[:1000]
+
+@app.post('/api/projects/{pid}/production/generate',status_code=202)
+def production_generate(pid: str,body: GenerateProjectRequest):
+    checked_pid(pid)
+    if not body.live:
+        return {'status':'dry_run','estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
+    if not body.confirm_paid or body.confirmation_project_id!=pid:
+        raise HTTPException(400,'Paid generation requires explicit confirmation and matching project ID')
+    if body.budget is None or body.budget<=0:
+        raise HTTPException(400,'Paid generation requires an explicit positive per-run budget')
+    with core.connect() as db:
+        p=core.project(db,pid)
+        if p['provider']=='mock':
+            raise HTTPException(400,'Mock projects are not paid cloud projects')
+        if body.budget>p['budget']:
+            raise HTTPException(400,'Run budget cannot exceed project budget')
+    # Preflight before queuing; still no provider call.
+    estimate=api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)
+    jid=uuid4().hex
+    job={'id':jid,'project_id':pid,'status':'queued','estimate':estimate,'result':None,'error':None}
+    _production_jobs[jid]=job
+    _production_pool.submit(_production_execute,jid,pid,body.budget,body.limit)
+    return job
+
+@app.get('/api/projects/{pid}/production/jobs/{jid}')
+def production_job(pid: str,jid: str):
+    checked_pid(pid)
+    job=_production_jobs.get(jid)
+    if not job or job['project_id']!=pid: raise HTTPException(404,'Job not found')
+    return job

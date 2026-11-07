@@ -1,9 +1,10 @@
 # AI Video Studio + VBench shared Provider Core
 
 This repository contains Studio, VBench, and their shared provider core. The
-Director Workspace is the v0.9.2 feature increment.
+v0.9.3 increment adds browser-based project creation, planning and generation.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
-the existing CLI. See [the v0.9.2 guide](README-v0.9.2.md) for the Director
+the existing CLI. See [the v0.9.3 guide](README-v0.9.3.md) for production,
+[the v0.9.2 guide](README-v0.9.2.md) for the Director
 Workspace, [the v0.9.1 guide](README-v0.9.1.md) for Director vision
 review, [the v0.9.0 guide](README-v0.9.0.md) for offline Director analysis,
 [the v0.8.1 guide](README-v0.8.1.md) for preview and
@@ -100,10 +101,10 @@ See [the v0.9.2 guide](README-v0.9.2.md) for its API endpoints.
 
 ## Local visual editor
 
-The v0.8.1 editor lets you browse existing projects, preview shots, select
+The editor lets you browse existing projects, preview shots, select
 registered original or I2V assets, and add, audition or remove sound effects
-on a timeline. It reuses the existing project database and does not initiate
-paid AI generation calls. Paid generation remains a CLI workflow.
+on a timeline. It reuses the existing project database. Its Production
+workspace can also initiate explicitly confirmed paid video generation.
 
 Select a purple sound-effect clip to edit it. Drag the clip to change its
 start time, drag its right edge to change its duration, or adjust its timing
@@ -142,6 +143,33 @@ Open <http://127.0.0.1:5173>. The Vite server proxies API requests to port
 Internet. Audio files must be accessible on the backend machine. Preserve
 `studio-data` when upgrading, or point `STUDIO_HOME` to the existing data.
 See [the v0.8.1 guide](README-v0.8.1.md) for details and limitations.
+
+### Create, plan and generate in the browser
+
+In the **Production · 创建 / 分镜 / 生成** section:
+
+1. Enter a story, duration, provider (`mock`, `minimax`, `wan`, or `flux`)
+   and project budget, then create the project.
+2. Set a shot length and choose **Plan**. Existing storyboards are not
+   overwritten; create a new project to plan again.
+3. Set a run budget and optional shot limit (`0` means all), then select
+   **Dry Run / 费用预估**. For cloud providers this shows pending shots and
+   estimated reservations without a paid provider call.
+4. To generate paid cloud video, check the estimate and provider rates, select
+   **明确授权付费生成**, and confirm the project and budget in the dialog.
+   The backend also requires explicit confirmation, the matching project ID,
+   and a positive run budget no larger than the project budget.
+5. The background job reports `queued`, `running`, `completed`, or `failed`.
+   After completion, use **同步素材** to register generated clips.
+
+**Mock exception:** Dry Run calls the existing mock generation path, which
+creates local clips and updates project/shot state instead of only estimating;
+it does not call a paid API. The paid-generation action rejects mock projects.
+FFmpeg and FFprobe are required for generation and estimation. Configured
+cloud prices and budget reservations are estimates, not a guarantee of the
+provider's final bill. Job status is held in memory and is lost on API restart;
+underlying submission state remains in SQLite. Never blindly resubmit an
+ambiguous submission. See [the v0.9.3 guide](README-v0.9.3.md).
 
 ## Tests
 ```bash
@@ -250,3 +278,4 @@ describe their release and may have been addressed by later increments.
 | [v0.9.0](README-v0.9.0.md) | Offline technical checks, evidence frames and historical JSON reports. |
 | [v0.9.1](README-v0.9.1.md) | Opt-in vision review, planning budget and independent review reports. |
 | [v0.9.2](README-v0.9.2.md) | React Director workspace and separately saved human decisions. |
+| [v0.9.3](README-v0.9.3.md) | Browser project creation, planning, cost preview and explicitly confirmed background cloud generation. |
