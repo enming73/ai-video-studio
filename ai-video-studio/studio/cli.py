@@ -3,7 +3,7 @@ import typer
 from rich.console import Console
 from . import core
 
-app = typer.Typer(help="AI Video Studio v0.5 — storyboard and video generation")
+app = typer.Typer(help="AI Video Studio v0.7 — storyboard, timeline and web editor")
 console = Console()
 
 @app.command()
@@ -206,7 +206,7 @@ def captions_draft_cmd(project_id: str, output: str = None):
     except ValueError as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
 
 @app.command("audio-add")
-def audio_add_cmd(project_id: str, file: str, at: float, duration: float = None,
+def audio_add_cmd(project_id: str, file: str = typer.Option(..., "--file"), at: float = typer.Option(..., "--at"), duration: float = None,
                   gain: float = 1.0, fade_in: float = 0.0, fade_out: float = 0.0):
     from . import sound
     try: console.print_json(json.dumps(sound.audio_add(project_id,file,at,duration,gain,fade_in,fade_out),ensure_ascii=False))
@@ -256,3 +256,16 @@ def narration_attach_cmd(project_id: str):
     from . import narration
     try: console.print_json(json.dumps(narration.attach(project_id),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
+
+
+@app.command("web")
+def web_cmd(host: str = "127.0.0.1", port: int = 8765):
+    """Start local Studio web API (requires uv sync --extra web)."""
+    try:
+        import uvicorn
+        from .webapp import app as web_app
+    except ImportError as exc:
+        raise typer.BadParameter("Install web dependencies: uv sync --extra web") from exc
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise typer.BadParameter("Only loopback hosts are supported for this local editor")
+    uvicorn.run(web_app, host=host, port=port)
