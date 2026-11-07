@@ -31,7 +31,8 @@ def _shots(pid):
 def _script_path(pid): return _root(pid) / 'script.json'
 
 
-def plan(pid, language='zh-CN', model=None, live=False, base_url=None):
+def plan(pid, language='zh-CN', model=None, live=False, base_url=None, *, budget_usd=None):
+    if live: core.require_paid_budget(budget_usd)
     shots = _shots(pid)
     if not shots: raise ValueError('Project has no storyboard')
     target = _script_path(pid)
@@ -97,7 +98,8 @@ def _speed_filter(actual, desired):
     return f'atempo={ratio:.5f}'
 
 
-def synthesize(pid, voice='alloy', model='gpt-4o-mini-tts', live=False, max_chars=1200, force=False):
+def synthesize(pid, voice='alloy', model='gpt-4o-mini-tts', live=False, max_chars=1200, force=False, *, budget_usd=None):
+    if live: core.require_paid_budget(budget_usd)
     data=show(pid)
     lines=data['lines']; total=sum(len(x['text']) for x in lines)
     root=_root(pid); output=root/'narration.wav'; captions=root/'narration.srt'

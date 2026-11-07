@@ -106,6 +106,10 @@ def select(pid, seq, aid):
         a=db.execute('SELECT * FROM shot_assets WHERE id=? AND project_id=? AND shot_id=?',(aid,pid,shot['id'])).fetchone()
         if not a: raise ValueError('Asset does not belong to this shot')
         if not Path(a['file']).is_file(): raise ValueError('Asset file is missing')
+        old=db.execute('SELECT asset_id FROM timeline_items WHERE project_id=? AND shot_id=?',(pid,shot['id'])).fetchone()
+        if old is None or old['asset_id'] != aid:
+            db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?',(pid,shot['id']))
+            db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?',(pid,))
         db.execute('INSERT INTO timeline_items VALUES(?,?,?,?,?) ON CONFLICT(project_id,shot_id) DO UPDATE SET asset_id=excluded.asset_id, position=excluded.position, duration=excluded.duration',
                    (pid,shot['id'],aid,shot['seq'],shot['duration']))
     return aid
@@ -129,9 +133,20 @@ def render(pid, output=None, source='selected'):
     core.require_ffmpeg()
     with core.connect() as db:
         migrate(db)
+        db.execute('BEGIN')
         p=core.project(db,pid)
         shots=_shots(db,pid)
         if not shots: raise ValueError('No shots')
+        guided=db.execute('SELECT * FROM guided_projects WHERE project_id=?',(pid,)).fetchone()
+        if guided:
+            if not guided['storyboard_confirmed'] or source != 'selected':
+                raise ValueError('Guided render requires confirmed storyboard and selected assets')
+            for s in shots:
+                approval=db.execute('''SELECT 1 FROM guided_confirmations c
+                    JOIN timeline_items t ON t.project_id=c.project_id AND t.shot_id=c.shot_id
+                    WHERE c.project_id=? AND c.shot_id=? AND c.asset_id=t.asset_id AND c.prompt=?''',
+                    (pid,s['id'],s['prompt'])).fetchone()
+                if not approval: raise ValueError('All guided shots must be confirmed before render')
         selected=[]
         for s in shots:
             if source in ('selected','mixed'):

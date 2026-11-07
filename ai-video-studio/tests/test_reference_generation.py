@@ -34,3 +34,14 @@ def test_i2v_paid_requires_ceiling(tmp_path,monkeypatch):
     pid,f=setup(tmp_path,monkeypatch);references.import_shot(pid,1,f)
     with pytest.raises(ValueError,match='max-usd'):
         rg.i2v(pid,1,live=True)
+
+
+def test_repeated_frame_generation_does_not_overwrite_prior_image(tmp_path, monkeypatch):
+    pid, _ = setup(tmp_path, monkeypatch)
+    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    images = iter([PNG, PNG + b'new-version'])
+    monkeypatch.setattr(rg, '_http_json', lambda *args, **kwargs: {'data': [{'b64_json': base64.b64encode(next(images)).decode()}]})
+    first = rg.generate_frame(pid, 1, live=True, budget_usd=1, client=object())
+    second = rg.generate_frame(pid, 1, live=True, budget_usd=1, force=True, client=object())
+    assert first['generated_file'] != second['generated_file']
+    assert Path(first['generated_file']).read_bytes() == PNG

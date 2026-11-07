@@ -1,5 +1,10 @@
 # AI Video Studio + VBench shared Provider Core
 
+For the opt-in LLM storyboard and sequential production workflow, see
+[the guided workflow guide](docs/guided-workflow.md). Live CLI calls for
+storyboard, narration, speech and reference images now also require an explicit
+per-call `--budget`; these reservations are not provider-enforced spend caps.
+
 This repository contains Studio, VBench, and their shared provider core. The
 v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
 Studio includes a local React/Vite visual editor backed by FastAPI, alongside
@@ -233,10 +238,10 @@ Configure the LLM and TTS credentials as described in
 
 ```bash
 cd ai-video-studio
-uv run --env-file .env studio narration-plan PROJECT_ID --language zh-CN --model gpt-4o-mini --live
+uv run --env-file .env studio narration-plan PROJECT_ID --language zh-CN --model gpt-4o-mini --live --budget 1
 uv run studio narration-show PROJECT_ID
 # Edit studio-data/PROJECT_ID/narration/script.json before TTS.
-uv run --env-file .env studio narration-tts PROJECT_ID --voice alloy --model gpt-4o-mini-tts --live
+uv run --env-file .env studio narration-tts PROJECT_ID --voice alloy --model gpt-4o-mini-tts --live --budget 1
 uv run studio narration-attach PROJECT_ID
 uv run studio export-film PROJECT_ID --source selected --burn-subtitles
 ```
@@ -293,7 +298,7 @@ Cloud provider clips must match requested duration within 0.25 seconds and be co
 When a submission fails after its state is persisted as `SUBMITTING`, **never automatically resubmit**. Find the remote task ID on the vendor dashboard and attach it:
 ```bash
 uv run studio attach PROJECT_ID SHOT_ID REMOTE_TASK_ID --confirm
-uv run studio generate PROJECT_ID --live
+uv run studio generate PROJECT_ID --live --budget 5
 ```
 The DB is migrated additively from v0.1. `STUDIO_HOME` must point to the same original studio-data directory to reuse existing projects.
 

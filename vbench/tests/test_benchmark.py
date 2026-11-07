@@ -48,11 +48,11 @@ def test_wan_untrusted(monkeypatch):
     monkeypatch.setenv('WAN_BASE_URL','https://wan3.video')
     with pytest.raises(ProviderError): Wan(FakeClient([]))
 
-def test_flux_poll_uses_app_level_queue_url(monkeypatch):
+def test_flux_poll_uses_model_queue_url(monkeypatch):
     monkeypatch.setenv('FAL_KEY','fake')
     client=FakeClient([{'status':'IN_PROGRESS'}])
     assert Flux(client).poll('uuid').status=='running'
-    assert client.calls[0][1]=='https://queue.fal.run/blackforestlabs/flux-3-max/requests/uuid/status'
+    assert client.calls[0][1]=='https://queue.fal.run/blackforestlabs/flux-3-max/text-to-video/requests/uuid/status'
 
 
 def test_flux_duration_sent_as_integer(monkeypatch):

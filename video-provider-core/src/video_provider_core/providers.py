@@ -78,7 +78,7 @@ class Flux(Provider):
         if not rid: raise ProviderError(f'fal missing request_id: {data}')
         return str(rid)
     def poll(self,remote_id):
-        base='https://queue.fal.run/blackforestlabs/flux-3-max/requests/'+remote_id
+        base='https://queue.fal.run/'+self.model+'/requests/'+remote_id
         status=request_json(self.client,'GET',base+'/status',headers=self.headers()).get('status','')
         if status == 'COMPLETED':
             data=request_json(self.client,'GET',base,headers=self.headers())

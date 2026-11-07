@@ -16,6 +16,11 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("STUDIO_HOME", "./studio-data")).resolve()
 
+def require_paid_budget(budget):
+    if (isinstance(budget, bool) or not isinstance(budget, (int, float))
+            or not math.isfinite(budget) or budget <= 0):
+        raise ValueError('An explicit positive budget is required for paid requests')
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -42,6 +47,22 @@ def connect():
     db.execute("""CREATE TABLE IF NOT EXISTS storyboards (
       project_id TEXT PRIMARY KEY, bible_json TEXT NOT NULL,
       planner TEXT NOT NULL, updated TEXT NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS guided_projects (
+      project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0,
+      draft_json TEXT, storyboard_confirmed INTEGER NOT NULL DEFAULT 0)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS guided_confirmations (
+      project_id TEXT NOT NULL, shot_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+      prompt TEXT NOT NULL, PRIMARY KEY(project_id, shot_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS guided_attempts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, shot_id TEXT NOT NULL,
+      request_id TEXT NOT NULL, prompt TEXT NOT NULL, duration INTEGER NOT NULL,
+      provider TEXT NOT NULL, reserved_usd REAL NOT NULL, status TEXT NOT NULL,
+      remote_id TEXT, video_url TEXT, file TEXT, asset_id TEXT, error TEXT,
+      UNIQUE(project_id, request_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS guided_planning_attempts (
+      project_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL,
+      model TEXT NOT NULL, budget_usd REAL NOT NULL, result_json TEXT, error TEXT,
+      PRIMARY KEY(project_id, request_id))""")
     db.commit()
     return db
 
@@ -67,6 +88,8 @@ def plan(pid, shot_length=10):
         raise ValueError("shot_length must be between 1 and 30 seconds")
     with connect() as db:
         p = project(db, pid)
+        if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+            raise ValueError('Use guided storyboard planning for this project')
         if p["provider"] != "mock" and (not 5 <= shot_length <= 15 or p["duration"] % shot_length and p["duration"] % shot_length < 5):
             raise ValueError("Cloud shots must each be 5..15 seconds; choose another shot length")
         existing = db.execute("SELECT COUNT(*) FROM shots WHERE project_id=?", (pid,)).fetchone()[0]
@@ -111,10 +134,17 @@ def _llm_json(system, user, model, base_url):
     return json.loads(content)
 
 
-def smart_plan(pid, shot_length=10, model=None, base_url=None):
+def smart_plan(pid, shot_length=10, model=None, base_url=None, *, budget=None, confirm_paid=False):
     """Plan only: no video-generation API calls. Existing shots are never overwritten."""
+    if (confirm_paid is not True or isinstance(budget, bool) or not isinstance(budget, (int, float))
+            or not math.isfinite(budget) or budget <= 0):
+        raise ValueError('Explicit paid confirmation and a positive budget are required')
+    if type(shot_length) is not int or not 5 <= shot_length <= 15:
+        raise ValueError('Use shot lengths 5..15s')
     with connect() as db:
         p = dict(project(db, pid))
+        if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+            raise ValueError('Use the guided workspace for guided projects')
         if db.execute("SELECT 1 FROM shots WHERE project_id=?", (pid,)).fetchone():
             raise ValueError("Project already has shots; create a new project to preserve paid assets")
     if not model:
@@ -166,6 +196,9 @@ def update_shot(pid, seq, prompt):
         if shot["status"] not in ("PLANNED", "FAILED") or shot["remote_id"] or shot["file"] or shot["reserved_usd"]:
             raise ValueError("Cannot edit submitted/generated/charged shot; create a new project to preserve assets")
         db.execute("UPDATE shots SET prompt=?,status='PLANNED',error=NULL WHERE id=?",(prompt.strip(),shot["id"]))
+        if prompt.strip() != shot['prompt']:
+            db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid,shot['id']))
+            db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
     return shot["id"]
 
 
@@ -212,6 +245,11 @@ def mock_generate(shot, target):
 
 def generate(pid, live=False, budget=None, poll_interval=15, limit=0):
     load_dotenv()
+    with connect() as db:
+        if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+            raise ValueError('Use guided per-shot generation for this project')
+        if live and project(db, pid)['provider'] != 'mock':
+            require_paid_budget(budget)
     require_ffmpeg()
     with connect() as db:
         p = project(db, pid)
@@ -231,8 +269,8 @@ def generate(pid, live=False, budget=None, poll_interval=15, limit=0):
                     db.execute("UPDATE shots SET status='COMPLETED',file=?,error=NULL WHERE id=?",
                                (str(path), shot["id"]))
                 continue
-            except Exception:
-                path.unlink(missing_ok=True)
+            except Exception as exc:
+                raise ValueError(f'Existing clip is invalid; preserving it: {path}') from exc
         with connect() as db:
             db.execute("UPDATE shots SET status='GENERATING',attempts=attempts+1,error=NULL WHERE id=?", (shot["id"],))
         try:
@@ -248,6 +286,9 @@ def generate(pid, live=False, budget=None, poll_interval=15, limit=0):
     return len(shots)
 
 def render(pid):
+    with connect() as db:
+        if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+            raise ValueError('Use guided selected-asset rendering for this project')
     require_ffmpeg()
     with connect() as db:
         p = project(db, pid)
@@ -256,6 +297,9 @@ def render(pid):
         raise ValueError("All shots must be generated before rendering")
     directory = HOME / pid
     directory.mkdir(parents=True, exist_ok=True)
+    target=directory / "final.mp4"
+    if target.exists():
+        raise ValueError(f'Output exists; refusing overwrite: {target}')
     normalized = directory / "normalized"
     normalized.mkdir(exist_ok=True)
     manifest = directory / "timeline.json"
@@ -282,7 +326,6 @@ def render(pid):
             temp.unlink(missing_ok=True)
         paths.append(dst)
     concat.write_text("".join("file '" + str(x.resolve()).replace("'", "'\\''") + "'\n" for x in paths),encoding="utf-8")
-    target=directory / "final.mp4"
     tmp=directory / "final.part.mp4"
     try:
         run(["ffmpeg","-hide_banner","-loglevel","error","-y","-f","concat","-safe","0","-i",str(concat),
@@ -306,6 +349,11 @@ def status(pid):
 
 def generate_cloud(pid, live=False, budget=None, poll_interval=15, limit=0):
     from video_provider_core.media import download
+    if live:
+        require_paid_budget(budget)
+    with connect() as db:
+        if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
+            raise ValueError('Use guided per-shot generation for this project')
     if poll_interval < 1 or limit < 0:
         raise ValueError("Invalid poll interval or limit")
     with connect() as db:
@@ -384,7 +432,8 @@ def generate_cloud(pid, live=False, budget=None, poll_interval=15, limit=0):
             if url:
                 target=output / f"{sid}.mp4"
                 try:
-                    download(client,url,target)
+                    if not target.exists():
+                        download(client,url,target)
                     verify_video(target,shot["duration"])
                 except Exception as e:
                     with connect() as db:
