@@ -41,6 +41,18 @@ def test_backfill_is_idempotent_and_lossless(legacy_project):
     assert (core.HOME / 'video-1.mp4').exists()
 
 
+def test_backfill_creates_empty_boundaries_without_legacy_frames(boundary_project):
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('DELETE FROM guided_boundaries WHERE project_id=?', (pid,))
+    first = workflow.get(pid)
+    assert [b['position'] for b in first['boundaries']] == [0, 1, 2]
+    assert all(b['candidate_count'] == 0 for b in first['boundaries'])
+    assert all(not b['confirmed'] for b in first['boundaries'])
+    second = workflow.get(pid)
+    assert second['boundaries'] == first['boundaries']
+
+
 def test_backfilled_3_2_candidate_cannot_be_confirmed_before_crop(legacy_project):
     pid, state = legacy_project
     state = workflow.get(pid)

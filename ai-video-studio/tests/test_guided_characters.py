@@ -129,7 +129,7 @@ def test_changing_role_invalidates_only_linked_shots_and_requires_keep_decision(
     state = characters.confirm_character(pid, a, 'a1', state['revision'])
     state = characters.confirm_character(pid, b, 'b1', state['revision'])
     for seq, ids in [(1, [a]), (2, [b]), (3, [a, b]), (4, [])]:
-        state = characters.set_shot_characters(pid, seq, ids, workflow.get(pid)['revision'])
+        state = characters.set_shot_characters(pid, seq, ids, characters.get(pid)['revision'])
         f = tmp_path / f'video{seq}.mp4'
         f.write_bytes(f'video{seq}'.encode())
         files[seq] = f

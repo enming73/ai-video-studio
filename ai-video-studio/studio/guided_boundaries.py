@@ -28,9 +28,6 @@ def backfill_legacy(db, pid: str) -> bool:
     """
     if db.execute('SELECT 1 FROM guided_boundaries WHERE project_id=? AND active=1', (pid,)).fetchone():
         return False
-    if not db.execute('SELECT 1 FROM guided_frame_selection WHERE project_id=? AND confirmed_frame_id IS NOT NULL',
-                      (pid,)).fetchone():
-        return False
     shots = db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq', (pid,)).fetchall()
     if not shots:
         return False
