@@ -52,13 +52,19 @@ class MiniMax(Provider):
         rid = data.get('task_id')
         if not rid: raise ProviderError(f'MiniMax missing task_id: {data}')
         return str(rid)
-    def submit_i2v(self, prompt, duration, first_frame, mime_type):
-        if mime_type not in ('image/png', 'image/jpeg', 'image/webp') or not isinstance(first_frame, bytes) or not first_frame:
+    def submit_i2v(self, prompt, duration, first_frame, mime_type, last_frame=None, last_mime_type=None):
+        supported = ('image/png', 'image/jpeg', 'image/webp')
+        if mime_type not in supported or not isinstance(first_frame, bytes) or not first_frame:
             raise ValueError('A supported first-frame image is required')
-        image = f'data:{mime_type};base64,' + base64.b64encode(first_frame).decode('ascii')
+        if last_frame is not None and (last_mime_type not in supported
+                or not isinstance(last_frame, bytes) or not last_frame):
+            raise ValueError('A supported last-frame image is required')
+        content = [{'type':'text','text':prompt},
+          {'type':'image_url','image_url':{'url':f'data:{mime_type};base64,' + base64.b64encode(first_frame).decode('ascii')},'role':'first_frame'}]
+        if last_frame is not None:
+            content.append({'type':'image_url','image_url':{'url':f'data:{last_mime_type};base64,' + base64.b64encode(last_frame).decode('ascii')},'role':'last_frame'})
         data = request_json(self.client, 'POST', self.base+'/v2/video_generation', headers=self.headers(), json={
-            'model':'MiniMax-H3', 'content':[{'type':'text','text':prompt},
-              {'type':'image_url','image_url':{'url':image},'role':'first_frame'}],
+            'model':'MiniMax-H3', 'content':content,
             'resolution':'768P','duration':duration,'ratio':'adaptive'})
         rid = data.get('task_id')
         if not rid: raise ProviderError('MiniMax missing task_id')
