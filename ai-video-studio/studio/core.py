@@ -133,6 +133,16 @@ def connect():
       character_id TEXT NOT NULL,
       image_id TEXT NOT NULL,
       PRIMARY KEY(frame_id, character_id));
+    CREATE TABLE IF NOT EXISTS guided_boundary_prompts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, boundary_id TEXT NOT NULL,
+      prompt TEXT NOT NULL, source_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+      created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_boundary_prompt_attempts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, boundary_id TEXT NOT NULL,
+      request_id TEXT NOT NULL, status TEXT NOT NULL, model TEXT NOT NULL,
+      budget_usd REAL NOT NULL, source_sha256 TEXT NOT NULL,
+      result_prompt TEXT, error TEXT, created TEXT NOT NULL,
+      UNIQUE(project_id, request_id));
     """)
     provenance_columns = {row[1] for row in db.execute("PRAGMA table_info(guided_video_provenance)")}
     for name, kind in [("last_frame_id", "TEXT"), ("last_frame_sha256", "TEXT")]:

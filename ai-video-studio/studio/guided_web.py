@@ -137,6 +137,21 @@ class ExtractBoundary(Revision):
     side: Literal['start', 'end']
 
 
+class PromptSelect(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
+class PromptRequest(Revision):
+    model: str = Field(min_length=1, max_length=200)
+    budget_usd: float = Field(default=0, ge=0, le=10000)
+    confirm_paid: bool = False
+    request_id: str = Field(default='', max_length=128)
+
+
+class PromptResolve(BaseModel):
+    confirm_checked: bool = False
+
+
 @router.post('/characters')
 def create_character(pid: str, body: CharacterEdit):
     return call(guided_characters.save_character, pid, None, body.name, body.description, body.revision)
@@ -270,6 +285,39 @@ def keep_old_video(pid: str, seq: int, body: Confirm):
 @router.post('/shots/{seq}/extract-boundary')
 def extract_boundary(pid: str, seq: int, body: ExtractBoundary):
     return call(guided_boundaries.extract_from_asset, pid, seq, body.side, body.revision)
+
+
+@router.get('/boundaries/{boundary_id}/prompt')
+def boundary_prompt(pid: str, boundary_id: str):
+    return call(guided_boundaries.prompt_state, pid, boundary_id)
+
+
+@router.post('/boundaries/{boundary_id}/prompt/preview')
+def boundary_prompt_preview(pid: str, boundary_id: str, body: PromptSelect):
+    return call(guided_boundaries.preview_prompt, pid, boundary_id, body.model)
+
+
+@router.post('/boundaries/{boundary_id}/prompt')
+def boundary_prompt_generate(pid: str, boundary_id: str, body: PromptRequest):
+    return call(guided_boundaries.generate_prompt, pid, boundary_id, body.model, body.budget_usd,
+                confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
+
+
+@router.delete('/boundaries/{boundary_id}/prompt')
+def boundary_prompt_clear(pid: str, boundary_id: str, body: Revision):
+    return call(guided_boundaries.clear_prompt, pid, boundary_id, body.revision)
+
+
+@router.get('/prompt-attempts')
+def prompt_attempts(pid: str):
+    call(guided_workflow.get, pid)
+    return call(guided_boundaries.list_prompt_attempts, pid)
+
+
+@router.post('/prompt-attempts/{attempt_id}/resolve')
+def resolve_prompt(pid: str, attempt_id: str, body: PromptResolve):
+    return call(guided_boundaries.resolve_prompt_attempt, pid, attempt_id,
+                confirm_checked=body.confirm_checked)
 
 
 @router.get('/')

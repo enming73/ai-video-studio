@@ -6,10 +6,19 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
   const [budget, setBudget] = useState('1');
   const [preview, setPreview] = useState(null);
   const [dims, setDims] = useState({});
+  const [promptInfo, setPromptInfo] = useState(null);
+  const [promptModel, setPromptModel] = useState('gpt-4o-mini');
+  const [promptBudget, setPromptBudget] = useState('0.1');
+  const [promptAttempts, setPromptAttempts] = useState([]);
   useEffect(() => {
     setPreview(null);
     setDims({});
-    if (boundary) call(root + `/boundaries/${boundary.id}/frames`).then(setFrames).catch(() => setFrames([]));
+    if (!boundary) return;
+    call(root + `/boundaries/${boundary.id}/frames`).then(setFrames).catch(() => setFrames([]));
+    call(root + `/boundaries/${boundary.id}/prompt`).then(setPromptInfo).catch(() => setPromptInfo(null));
+    call(root + '/prompt-attempts')
+      .then(rows => setPromptAttempts(rows.filter(a => a.boundary_id === boundary.id)))
+      .catch(() => setPromptAttempts([]));
   }, [pid, boundary?.id, state.revision]);
 
   if (!boundary) return null;
@@ -27,6 +36,39 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
       await call(root + `/boundaries/${boundary.id}/confirm`, 'DELETE', {revision: state.revision});
       await refresh(true);
     })}>取消确认</button>}
+    <section className="guided-prompt-panel">
+      <h5>边界提示词</h5>
+      {promptInfo && <>
+        <p>当前来源：{promptInfo.effective_source === 'llm'
+          ? `AI（${promptInfo.llm_prompt_model}${promptInfo.llm_prompt_current ? '' : ' · 已过期'}）`
+          : '自动规则'}</p>
+        <pre className="guided-prompt">{promptInfo.effective_prompt}</pre>
+      </>}
+      <div className="fields">
+        <label>提示词模型<input value={promptModel} onChange={e => setPromptModel(e.target.value)} /></label>
+        <label>本次预算 USD<input type="number" min="0" step="0.01" value={promptBudget} onChange={e => setPromptBudget(e.target.value)} /></label>
+        <button disabled={busy || !promptModel.trim() || Number(promptBudget) <= 0} onClick={() => run(async () => {
+          if (!window.confirm(`确认将相邻镜头描述发送给 ${promptModel} 生成边界提示词？\n本次预算 $${promptBudget}，不是供应商硬上限。`)) return;
+          const r = await call(root + `/boundaries/${boundary.id}/prompt`, 'POST', {
+            model: promptModel, budget_usd: Number(promptBudget), confirm_paid: true,
+            request_id: crypto.randomUUID(), revision: state.revision});
+          await refresh(true);
+          if (r.status !== 'COMPLETED') throw Error('提示词请求结果不明，请先核查供应商账单。');
+        })}>AI 写这个边界的提示词</button>
+      </div>
+      {promptInfo?.llm_prompt && <div className="fields"><button onClick={() => run(async () => {
+        if (!window.confirm('恢复自动提示词？AI 提示词记录会删除，已生成的图片不受影响。')) return;
+        await call(root + `/boundaries/${boundary.id}/prompt`, 'DELETE', {revision: state.revision});
+        await refresh(true);
+      })}>恢复自动提示词</button></div>}
+      {promptAttempts.filter(a => ['SUBMITTING', 'UNKNOWN'].includes(a.status)).map(a =>
+        <div className="guided-warning" key={a.id}>上次提示词请求结果不明，可能已计费：{a.error || a.status}。
+          <button onClick={() => run(async () => {
+            if (!window.confirm('确认已核查此请求，允许以后重新生成？')) return;
+            await call(root + `/prompt-attempts/${a.id}/resolve`, 'POST', {confirm_checked: true});
+            await refresh(true);
+          })}>已核查，解除阻止</button></div>)}
+    </section>
     <div className="guided-image-grid guided-boundary-grid">{frames.map(f => <figure key={f.id} className={f.confirmed ? 'selected' : ''}>
       <img src={`/api${root}/images/${f.id}`} alt={`边界 B${boundary.position} 候选`}
         onLoad={e => setDims(d => ({...d, [f.id]: {w: e.target.naturalWidth, h: e.target.naturalHeight}}))} />
@@ -43,7 +85,8 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
     </figure>)}</div>
     <div className="fields"><label>本次边界帧预算 USD<input type="number" min="0" step="0.01" value={budget} onChange={e => setBudget(e.target.value)} /></label>
       <button onClick={() => run(async () => setPreview(await call(root + `/boundaries/${boundary.id}/frames/preview`, 'POST', {model: 'gpt-image-2.5-sunburst'})))}>Dry Run / 边界帧预览</button></div>
-    {preview && <><p>将发送边界提示词及 {preview.references.length} 张已确认的角色参考图；价格未知，预算不是供应商硬上限。</p>
+    {preview && <><p>将发送{preview.prompt_source === 'llm' ? ' AI ' : '自动'}边界提示词及 {preview.references.length} 张已确认的角色参考图；价格未知，预算不是供应商硬上限。</p>
+      <details><summary>查看将发送的提示词</summary><pre className="guided-prompt">{preview.prompt}</pre></details>
       <button disabled={Number(budget) <= 0} onClick={() => run(async () => {
         if (!window.confirm(`确认付费生成边界 B${boundary.position}？预算 $${budget}，实际账单可能不同。`)) return;
         const r = await call(root + `/boundaries/${boundary.id}/frames`, 'POST', {model: 'gpt-image-2.5-sunburst', budget_usd: Number(budget), confirm_paid: true, request_id: crypto.randomUUID(), revision: state.revision});

@@ -168,6 +168,179 @@ def derive(db, pid: str, boundary_id: str) -> dict:
             'references': _references(db, pid, shot_ids)}
 
 
+_LLM_SYSTEM = (
+    'You write one still-frame description for an edit boundary between film shots. '
+    'Return JSON {"prompt": "..."} only. Describe a single photographic moment in 2-4 sentences. '
+    'Do not include camera movement, cuts, montage, fades, on-screen text, dialogue, storyboards, '
+    'panels, or multiple moments. Keep the same subject, clothing, location, lighting and props as '
+    'the supplied shots. Write in the same language as the shot descriptions. Output no other keys.')
+
+
+def _source_payload(db, pid: str, boundary_id: str):
+    boundary = db.execute('SELECT * FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
+                          (boundary_id, pid)).fetchone()
+    if not boundary:
+        raise ValueError('Unknown boundary')
+    position = boundary['position']
+    if position is None:
+        raise ValueError('Archived boundary')
+    shots = db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq',
+                       (pid,)).fetchall()
+    if not shots or not 0 <= position <= len(shots):
+        raise ValueError('No active shots for this boundary')
+    if position == 0:
+        role, adjacent = 'opening', [shots[0]]
+    elif position == len(shots):
+        role, adjacent = 'closing', [shots[-1]]
+    else:
+        role, adjacent = 'transition', [shots[position - 1], shots[position]]
+    refs = _references(db, pid, [shot['id'] for shot in adjacent])
+    payload = {
+        'role': role,
+        'position': position,
+        'shots': [{'seq': shot['seq'], 'prompt': shot['prompt']} for shot in adjacent],
+        'characters': [{'id': ref['id'], 'name': ref['name'], 'description': ref['description'],
+                        'image_id': ref['image_id'], 'image_sha256': ref['sha256']}
+                       for ref in refs],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return boundary, payload, digest
+
+
+def _prompt_state(db, pid: str, boundary_id: str) -> dict:
+    boundary, payload, digest = _source_payload(db, pid, boundary_id)
+    auto = derive(db, pid, boundary_id)
+    row = db.execute('SELECT * FROM guided_boundary_prompts WHERE project_id=? AND boundary_id=? '
+                     'ORDER BY created DESC, rowid DESC LIMIT 1', (pid, boundary_id)).fetchone()
+    current = bool(row and row['source_sha256'] == digest)
+    revision = db.execute('SELECT revision FROM guided_projects WHERE project_id=?',
+                          (pid,)).fetchone()['revision']
+    return {'boundary_id': boundary_id, 'position': auto['position'],
+            'auto_prompt': auto['prompt'], 'source_sha256': digest,
+            'llm_prompt': row['prompt'] if row else None,
+            'llm_prompt_current': current,
+            'llm_prompt_model': row['model'] if row else None,
+            'llm_prompt_created': row['created'] if row else None,
+            'effective_prompt': f'{_SINGLE_FRAME} {row["prompt"]}' if current else auto['prompt'],
+            'effective_source': 'llm' if current else 'auto',
+            'references': auto['references'], 'revision': revision}
+
+
+def prompt_state(pid: str, boundary_id: str) -> dict:
+    with core.connect() as db:
+        return _prompt_state(db, pid, boundary_id)
+
+
+def preview_prompt(pid: str, boundary_id: str, model: str) -> dict:
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError('LLM model is required')
+    from . import guided_characters, guided_workflow
+    with core.connect() as db:
+        guided_characters._enabled(db, pid)
+        guided_characters.require_confirmed(db, pid)
+        row = guided_workflow._row(db, pid)
+        if not row['storyboard_confirmed']:
+            raise ValueError('Confirm storyboard first')
+        _, payload, digest = _source_payload(db, pid, boundary_id)
+    return {'boundary_id': boundary_id, 'model': model.strip(), 'source_sha256': digest,
+            'payload': payload, 'estimated_cost_usd': None,
+            'note': 'LLM price is unknown; the budget is not a provider-enforced cap.'}
+
+
+def _prompt_attempt(pid: str, attempt_id: str) -> dict:
+    with core.connect() as db:
+        row = db.execute('SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? AND id=?',
+                         (pid, attempt_id)).fetchone()
+        if not row:
+            raise ValueError('Unknown prompt attempt')
+        item = dict(row)
+        item['prompt'] = item.get('result_prompt')
+        return item
+
+
+def generate_prompt(pid: str, boundary_id: str, model: str, budget_usd: float, *,
+                    confirm_paid: bool, request_id: str, revision: int) -> dict:
+    from . import guided_workflow
+    details = preview_prompt(pid, boundary_id, model)
+    core.require_paid_budget(budget_usd)
+    if confirm_paid is not True or not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        raise ValueError('Explicit confirmation and request ID required')
+    aid = uuid4().hex
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._revision(guided_workflow._row(db, pid), revision)
+        existing = db.execute('SELECT * FROM guided_boundary_prompt_attempts '
+                              'WHERE project_id=? AND request_id=?', (pid, request_id)).fetchone()
+        if existing:
+            if existing['boundary_id'] != boundary_id:
+                raise ValueError('Request ID belongs to another boundary')
+            item = dict(existing)
+            item['prompt'] = item.get('result_prompt')
+            return item
+        if db.execute("SELECT 1 FROM guided_boundary_prompt_attempts WHERE project_id=? AND boundary_id=? "
+                      "AND status IN ('SUBMITTING','UNKNOWN')", (pid, boundary_id)).fetchone():
+            raise ValueError('Previous prompt request is unresolved')
+        db.execute('INSERT INTO guided_boundary_prompt_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   (aid, pid, boundary_id, request_id, 'SUBMITTING', details['model'], budget_usd,
+                    details['source_sha256'], None, None, core.now()))
+    try:
+        result = core._llm_json(_LLM_SYSTEM, json.dumps(details['payload'], ensure_ascii=False),
+                                details['model'],
+                                os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1'))
+        text = result.get('prompt') if isinstance(result, dict) else None
+        if not isinstance(text, str) or not 20 <= len(text.strip()) <= 4000:
+            raise ValueError('Invalid prompt from the LLM')
+        text = text.strip()
+        with core.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            guided_workflow._revision(guided_workflow._row(db, pid), revision)
+            db.execute('INSERT INTO guided_boundary_prompts VALUES (?,?,?,?,?,?,?)',
+                       (uuid4().hex, pid, boundary_id, text, details['source_sha256'],
+                        details['model'], core.now()))
+            db.execute("UPDATE guided_boundary_prompt_attempts SET status='COMPLETED',result_prompt=? "
+                       "WHERE project_id=? AND id=?", (text, pid, aid))
+            db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+    except Exception as exc:
+        with core.connect() as db:
+            db.execute("UPDATE guided_boundary_prompt_attempts SET status='UNKNOWN',error=? "
+                       "WHERE project_id=? AND id=?", (str(exc)[:500], pid, aid))
+    return _prompt_attempt(pid, aid)
+
+
+def clear_prompt(pid: str, boundary_id: str, revision: int) -> dict:
+    from . import guided_workflow
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._revision(guided_workflow._row(db, pid), revision)
+        if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=?',
+                          (boundary_id, pid)).fetchone():
+            raise ValueError('Unknown boundary')
+        db.execute('DELETE FROM guided_boundary_prompts WHERE project_id=? AND boundary_id=?',
+                   (pid, boundary_id))
+        db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+    return prompt_state(pid, boundary_id)
+
+
+def list_prompt_attempts(pid: str) -> list[dict]:
+    with core.connect() as db:
+        return [dict(row) for row in db.execute(
+            'SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? ORDER BY rowid DESC',
+            (pid,))]
+
+
+def resolve_prompt_attempt(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:
+    if confirm_checked is not True:
+        raise ValueError('Confirm that provider charges were checked')
+    with core.connect() as db:
+        result = db.execute("UPDATE guided_boundary_prompt_attempts SET status='ACKNOWLEDGED' "
+                            "WHERE project_id=? AND id=? AND status IN ('SUBMITTING','UNKNOWN')",
+                            (pid, attempt_id))
+        if result.rowcount != 1:
+            raise ValueError('No unresolved prompt attempt')
+    return _prompt_attempt(pid, attempt_id)
+
+
 def ready(db, pid: str, boundary_id: str) -> bool:
     boundary = db.execute('SELECT confirmed_image_id FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
                           (boundary_id, pid)).fetchone()
@@ -216,7 +389,9 @@ def preview(pid: str, boundary_id: str, model: str) -> dict:
                               (pid,)).fetchone()
         if not settings or not settings['storyboard_reconfirmed']:
             raise ValueError('Confirm the storyboard for the character workflow')
-        details = derive(db, pid, boundary_id)
+        state = _prompt_state(db, pid, boundary_id)
+        details = {'position': state['position'], 'prompt': state['effective_prompt'],
+                   'references': state['references']}
         for shot_id in _adjacent_shot_ids(db, pid, details['position']):
             if not db.execute('SELECT 1 FROM guided_shot_cast_reviewed WHERE project_id=? AND shot_id=?',
                               (pid, shot_id)).fetchone():
@@ -224,13 +399,16 @@ def preview(pid: str, boundary_id: str, model: str) -> dict:
     for ref in details['references']:
         guided_images.image_path(pid, ref['image_id'])
     return {'boundary_id': boundary_id, 'position': details['position'], 'model': model,
-            'prompt': details['prompt'], 'references': details['references'],
+            'prompt': details['prompt'], 'prompt_source': state['effective_source'],
+            'llm_prompt_current': state['llm_prompt_current'],
+            'references': details['references'],
             'estimated_cost_usd': None, 'note': 'Budget is not a provider-enforced spending cap.'}
 
 
 def _boundary_snapshot_current(db, pid, details):
-    current = derive(db, pid, details['boundary_id'])
-    return current['prompt'] == details['prompt'] and current['references'] == details['references']
+    current = _prompt_state(db, pid, details['boundary_id'])
+    return (current['effective_prompt'] == details['prompt']
+            and current['references'] == details['references'])
 
 
 def generate(pid: str, boundary_id: str, model: str, budget_usd: float, *, confirm_paid: bool,
