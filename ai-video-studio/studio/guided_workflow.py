@@ -33,6 +33,12 @@ def get(pid: str) -> dict:
         timeline.migrate(db)
         row = _row(db, pid)
         settings = db.execute('SELECT * FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone()
+        boundary_state = None
+        boundary_by_position = {}
+        if settings:
+            from . import guided_boundaries
+            boundary_state = guided_boundaries.list_state(db, pid)
+            boundary_by_position = {b['position']: b for b in boundary_state}
         shots = db.execute('''SELECT s.id, s.seq, s.prompt, s.duration, t.asset_id,
              c.asset_id AS confirmed_asset, c.prompt AS confirmed_prompt
              FROM shots s LEFT JOIN timeline_items t ON t.project_id=s.project_id AND t.shot_id=s.id
@@ -54,6 +60,8 @@ def get(pid: str) -> dict:
                 item['confirmed_frame_id'] = frame['confirmed_frame_id'] if frame else None
                 item['old_video_decision_required'] = bool(stale and s['asset_id'] and stale['keep_asset_id'] != s['asset_id'])
                 item['video_provenance'] = dict(provenance) if provenance else None
+                item['start_boundary_id'] = (boundary_by_position.get(s['seq'] - 1) or {}).get('id')
+                item['end_boundary_id'] = (boundary_by_position.get(s['seq']) or {}).get('id')
             shot_data.append(item)
         choice = db.execute('SELECT provider,model FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
         return {'project_id': pid, 'revision': row['revision'], 'character_stage_enabled': bool(settings),
@@ -61,7 +69,7 @@ def get(pid: str) -> dict:
                 'video_model': dict(choice) if choice else None,
                 'draft': json.loads(row['draft_json']) if row['draft_json'] else None,
                 'storyboard_confirmed': bool(row['storyboard_confirmed']),
-                'shots': shot_data}
+                'shots': shot_data, 'boundaries': boundary_state}
 
 
 def save_draft(pid: str, draft: dict, revision: int) -> dict:
@@ -129,6 +137,9 @@ def confirm_storyboard(pid: str, revision: int) -> dict:
         db.execute("UPDATE projects SET status='PLANNED' WHERE id=?", (pid,))
         db.execute('UPDATE guided_projects SET storyboard_confirmed=1,revision=revision+1 WHERE project_id=?', (pid,))
         db.execute('UPDATE guided_character_settings SET storyboard_reconfirmed=1 WHERE project_id=?', (pid,))
+        if db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
+            from . import guided_boundaries
+            guided_boundaries.ensure_for_storyboard(db, pid)
     return get(pid)
 
 

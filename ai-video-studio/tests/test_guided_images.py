@@ -201,7 +201,8 @@ def test_selecting_video_from_current_frame_resolves_old_video_decision(tmp_path
         db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL)', (pid, shot_id))
         db.execute('INSERT INTO guided_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                    ('attempt',pid,shot_id,'request','prompt',10,'mock',0,'COMPLETED',None,None,str(video),asset,None))
-        db.execute('INSERT INTO guided_video_provenance VALUES (?,?,?,?)', ('attempt','frame','hash','mock'))
+        db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,model) VALUES (?,?,?,?)',
+                   ('attempt','frame','hash','mock'))
     timeline.select(pid, 1, asset)
     assert not workflow.get(pid)['shots'][0]['old_video_decision_required']
 

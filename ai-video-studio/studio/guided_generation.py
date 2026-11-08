@@ -160,7 +160,8 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
                       VALUES (?,?,?,?,?,?,?,?,?)''', (aid, pid, shot['id'], request_id, shot['prompt'], shot['duration'],
                                                     estimate['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
         if estimate['frame_id']:
-            db.execute('INSERT INTO guided_video_provenance VALUES (?,?,?,?)', (aid,estimate['frame_id'],estimate['frame_sha256'],estimate['model']))
+            db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,model) VALUES (?,?,?,?)',
+                       (aid, estimate['frame_id'], estimate['frame_sha256'], estimate['model']))
     if estimate['provider'] == 'mock':
         try:
             directory = core.HOME / pid / 'guided-attempts' / aid
