@@ -3,6 +3,7 @@ import hashlib
 import base64
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -142,7 +143,7 @@ def list_character_images(pid: str, character_id: str) -> list[dict]:
 def image_path(pid: str, image_id: str) -> Path:
     with core.connect() as db:
         guided_characters._enabled(db, pid)
-        row = db.execute('SELECT file,sha256 FROM guided_character_images WHERE project_id=? AND id=? UNION ALL SELECT file,sha256 FROM guided_frame_versions WHERE project_id=? AND id=?', (pid, image_id, pid, image_id)).fetchone()
+        row = db.execute('SELECT file,sha256 FROM guided_character_images WHERE project_id=? AND id=? UNION ALL SELECT file,sha256 FROM guided_frame_versions WHERE project_id=? AND id=? UNION ALL SELECT file,sha256 FROM guided_boundary_versions WHERE project_id=? AND id=?', (pid, image_id, pid, image_id, pid, image_id)).fetchone()
         if not row:
             raise ValueError('Unknown image')
     path = Path(row['file']).resolve()
@@ -162,6 +163,40 @@ def image_dimensions(path: Path) -> tuple[int, int]:
         return int(stream['width']), int(stream['height'])
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError) as exc:
         raise ValueError('Could not verify image dimensions') from exc
+
+
+def crop_to_16x9(source: Path, output: Path) -> bool:
+    """Crop to a centered 16:9 frame at 1536x864, returning whether a crop happened."""
+    width, height = image_dimensions(source)
+    ratio = 16 / 9
+    if abs(width / height - ratio) <= 0.01:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, output)
+        return False
+    if width / height > ratio:
+        crop_w = int(height * ratio)
+        crop_h = height
+    else:
+        crop_w = width
+        crop_h = int(width / ratio)
+    crop_w -= crop_w % 2
+    crop_h -= crop_h % 2
+    x = (width - crop_w) // 2
+    y = (height - crop_h) // 2
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(['ffmpeg','-v','error','-y','-i',str(source),
+                                 '-vf',f'crop={crop_w}:{crop_h}:{x}:{y},scale=1536:864',
+                                 '-frames:v','1',str(output)], capture_output=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('FFmpeg is required to normalize image aspect ratio') from exc
+    if result.returncode:
+        raise ValueError('Could not normalize image aspect ratio')
+    verify = subprocess.run(['ffmpeg','-v','error','-xerror','-i',str(output),'-frames:v','1','-f','null','-'],
+                            capture_output=True, timeout=15)
+    if verify.returncode:
+        raise ValueError('Could not normalize image aspect ratio')
+    return True
 
 
 def preview_character(pid: str, character_id: str, model: str) -> dict:
