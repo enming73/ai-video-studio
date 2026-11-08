@@ -20,6 +20,48 @@ def ensure_for_storyboard(db, pid: str) -> None:
                    'VALUES (?,?,?,?,?,?)', (uuid4().hex, pid, position, None, 1, core.now()))
 
 
+def backfill_legacy(db, pid: str) -> bool:
+    """Import legacy confirmed first frames as stale start-boundary candidates.
+
+    Runs once: guarded on no active boundaries existing, so repeated calls are
+    no-ops. Legacy tables and files are never modified.
+    """
+    if db.execute('SELECT 1 FROM guided_boundaries WHERE project_id=? AND active=1', (pid,)).fetchone():
+        return False
+    if not db.execute('SELECT 1 FROM guided_frame_selection WHERE project_id=? AND confirmed_frame_id IS NOT NULL',
+                      (pid,)).fetchone():
+        return False
+    shots = db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq', (pid,)).fetchall()
+    if not shots:
+        return False
+    ensure_for_storyboard(db, pid)
+    for shot in shots:
+        selection = db.execute('SELECT confirmed_frame_id FROM guided_frame_selection WHERE project_id=? AND shot_id=?',
+                               (pid, shot['id'])).fetchone()
+        imported = False
+        if selection and selection['confirmed_frame_id']:
+            frame_id = selection['confirmed_frame_id']
+            version = db.execute('SELECT file FROM guided_frame_versions WHERE id=?', (frame_id,)).fetchone()
+            if version and Path(version['file']).is_file():
+                detail = db.execute('SELECT prompt, model FROM guided_frame_details WHERE frame_id=?',
+                                    (frame_id,)).fetchone()
+                refs = [(r['character_id'], r['image_id']) for r in db.execute(
+                    'SELECT character_id, image_id FROM guided_frame_characters WHERE frame_id=?', (frame_id,)).fetchall()]
+                boundary = db.execute('SELECT id FROM guided_boundaries WHERE project_id=? AND active=1 AND position=?',
+                                      (pid, shot['seq'] - 1)).fetchone()
+                if boundary:
+                    insert_version(db, pid, boundary['id'], Path(version['file']), stale=True,
+                                   prompt=detail['prompt'] if detail else '',
+                                   model=detail['model'] if detail else '',
+                                   references=refs)
+                    imported = True
+        if imported and db.execute('SELECT 1 FROM timeline_items WHERE project_id=? AND shot_id=?',
+                                   (pid, shot['id'])).fetchone():
+            db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL',
+                       (pid, shot['id']))
+    return True
+
+
 def _state(db, boundary):
     candidate_count = db.execute('SELECT COUNT(*) FROM guided_boundary_versions WHERE boundary_id=?',
                                  (boundary['id'],)).fetchone()[0]

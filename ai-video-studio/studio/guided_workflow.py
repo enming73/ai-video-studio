@@ -37,6 +37,8 @@ def get(pid: str) -> dict:
         boundary_by_position = {}
         if settings:
             from . import guided_boundaries
+            if row['storyboard_confirmed']:
+                guided_boundaries.backfill_legacy(db, pid)
             boundary_state = guided_boundaries.list_state(db, pid)
             boundary_by_position = {b['position']: b for b in boundary_state}
         shots = db.execute('''SELECT s.id, s.seq, s.prompt, s.duration, t.asset_id,
