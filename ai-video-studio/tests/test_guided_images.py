@@ -106,25 +106,29 @@ def test_concurrent_duplicate_image_request_makes_one_submission(project, monkey
     assert len(calls) == 1
 
 
-def test_selecting_video_from_current_frame_resolves_old_video_decision(tmp_path, monkeypatch):
-    from studio import timeline
+def test_selecting_video_from_current_boundaries_resolves_old_video_decision(tmp_path, monkeypatch):
+    from studio import timeline, guided_boundaries as boundaries
+    from tests.helpers import add_version
     monkeypatch.setattr(core, 'HOME', tmp_path)
     pid = core.create('Forest', 10, 'mock', 5)
     workflow.create(pid, character_stage_enabled=True)
     state = roles.confirm_empty_cast(pid, 0)
     state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
         {'prompt': 'The river flows in a quiet forest.', 'duration': 10, 'character_ids': []}]}, state['revision'])
-    workflow.confirm_storyboard(pid, state['revision'])
+    state = workflow.confirm_storyboard(pid, state['revision'])
     shot_id = core.storyboard(pid)['shots'][0]['id']
+    start_id = add_version(pid, state['boundaries'][0]['id'], 'start', size='1536x864')
+    end_id = add_version(pid, state['boundaries'][1]['id'], 'end', size='1536x864')
+    boundaries.confirm(pid, state['boundaries'][0]['id'], start_id, state['revision'])
+    boundaries.confirm(pid, state['boundaries'][1]['id'], end_id, workflow.get(pid)['revision'])
     video = tmp_path / 'video.mp4'; video.write_bytes(b'video')
     asset = timeline.import_asset(pid, 1, str(video))
     with core.connect() as db:
-        db.execute('INSERT INTO guided_frame_selection VALUES (?,?,?)', (pid, shot_id, 'frame'))
         db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL)', (pid, shot_id))
         db.execute('INSERT INTO guided_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                    ('attempt',pid,shot_id,'request','prompt',10,'mock',0,'COMPLETED',None,None,str(video),asset,None))
-        db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,model) VALUES (?,?,?,?)',
-                   ('attempt','frame','hash','mock'))
+        db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,model,last_frame_id,last_frame_sha256) VALUES (?,?,?,?,?,?)',
+                   ('attempt',start_id,'hash','mock',end_id,'hash2'))
     timeline.select(pid, 1, asset)
     assert not workflow.get(pid)['shots'][0]['old_video_decision_required']
 

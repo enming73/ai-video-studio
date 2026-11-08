@@ -4,8 +4,8 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
-from studio import core, guided_boundaries as boundaries, guided_generation as generation, guided_images as images, guided_workflow as workflow, timeline
-from tests.helpers import add_version
+from studio import core, guided_boundaries as boundaries, guided_characters as characters, guided_generation as generation, guided_images as images, guided_workflow as workflow, provider_capabilities, timeline
+from tests.helpers import add_version, attach_video
 
 
 @pytest.fixture
@@ -38,6 +38,65 @@ def confirm_pair(pid, state, *positions):
         version = add_version(pid, boundary['id'], f'b{position}', size='1536x864')
         boundaries.confirm(pid, boundary['id'], version, workflow.get(pid)['revision'])
     return workflow.get(pid)
+
+
+@pytest.fixture
+def selected_fresh_video(tmp_path, monkeypatch):
+    """Single-shot character project with a generated, selected, current boundary video."""
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('An elephant', 10, 'mock', 0)
+    workflow.create(pid, character_stage_enabled=True)
+    state = characters.confirm_empty_cast(pid, 0)
+    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
+        {'prompt': 'An elephant walks.', 'duration': 10, 'character_ids': []}]}, state['revision'])
+    state = workflow.confirm_storyboard(pid, state['revision'])
+    generation.set_video_model(pid, 'mock', 'mock', workflow.get(pid)['revision'])
+    monkeypatch.setattr(generation, '_mock_frame_video',
+                        lambda shot, target, *a, **k: target.write_bytes(b'generated'))
+    monkeypatch.setattr(core, 'verify_video', lambda path, duration: None)
+    state = workflow.get(pid)
+    for i in (0, 1):
+        version = add_version(pid, state['boundaries'][i]['id'], f'b{i}', size='1536x864')
+        boundaries.confirm(pid, state['boundaries'][i]['id'], version, workflow.get(pid)['revision'])
+    attempt = generation.submit(pid, 1, 1, confirm_paid=True, request_id='fresh')
+    assert attempt['status'] == 'COMPLETED'
+    asset_id = attempt['asset_id']
+    timeline.select(pid, 1, asset_id)
+    return pid, asset_id
+
+
+def test_selecting_fresh_boundary_video_is_current_and_render_ready(selected_fresh_video):
+    pid, asset_id = selected_fresh_video
+    shot = workflow.get(pid)['shots'][0]
+    assert shot['old_video_decision_required'] is False
+    workflow.confirm_shot(pid, 1, asset_id, workflow.get(pid)['revision'])
+    assert workflow.render_ready(pid)
+
+
+def test_selecting_older_asset_marks_stale(selected_fresh_video):
+    pid, _ = selected_fresh_video
+    shot = workflow.get(pid)['shots'][0]
+    attach_video(pid, shot, 'old-start', 'old-end')
+    assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
+
+
+def test_reselecting_current_asset_clears_stale(selected_fresh_video):
+    pid, fresh_asset_id = selected_fresh_video
+    shot = workflow.get(pid)['shots'][0]
+    attach_video(pid, shot, 'old-start', 'old-end')
+    assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
+    timeline.select(pid, 1, fresh_asset_id)
+    assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is False
+
+
+def test_first_last_frame_capability_required(video_project, monkeypatch):
+    pid, state = video_project
+    state = confirm_pair(pid, state, 0, 1)
+    cap = provider_capabilities.i2v_capabilities('mock', 'mock')
+    monkeypatch.setattr(provider_capabilities, 'i2v_capabilities',
+                        lambda p, m: {**cap, 'first_last_frame': False})
+    with pytest.raises(ValueError, match='first'):
+        generation.preview(pid, 1)
 
 
 def test_any_shot_with_both_boundaries_can_generate_first(video_project):

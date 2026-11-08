@@ -1,6 +1,6 @@
 import pytest
 
-from studio import core, timeline, guided_workflow as workflow, guided_characters as characters
+from studio import core, timeline, guided_structure, guided_workflow as workflow, guided_characters as characters
 
 
 @pytest.fixture
@@ -156,3 +156,27 @@ def test_changing_role_invalidates_only_linked_shots_and_requires_keep_decision(
         state = characters.keep_old_video(pid, seq, asset, state['revision'])
     assert workflow.render_ready(pid)
     assert all(f.read_bytes() == f'video{seq}'.encode() for seq, f in files.items())
+
+
+def test_reconfirm_storyboard_ignores_archived_unreviewed_shot(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('An elephant', 20, 'mock', 0)
+    workflow.create(pid, character_stage_enabled=True)
+    state = characters.confirm_empty_cast(pid, 0)
+    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
+        {'prompt': 'An elephant walks.', 'duration': 10, 'character_ids': []},
+        {'prompt': 'An elephant drinks.', 'duration': 10, 'character_ids': []}]}, state['revision'])
+    state = workflow.confirm_storyboard(pid, state['revision'])
+    old = state['shots']
+    # Insert a shot (apply never writes cast_reviewed for it), then archive it.
+    state = guided_structure.apply(pid, [
+        {'id': old[0]['id'], 'prompt': old[0]['prompt'], 'duration': 8, 'character_ids': []},
+        {'id': None, 'prompt': 'An elephant looks up.', 'duration': 4, 'character_ids': []},
+        {'id': old[1]['id'], 'prompt': old[1]['prompt'], 'duration': 8, 'character_ids': []}], state['revision'])
+    new_id = next(s['id'] for s in state['shots'] if s['prompt'] == 'An elephant looks up.')
+    remaining = [s for s in state['shots'] if s['id'] != new_id]
+    state = guided_structure.apply(pid, [
+        {'id': remaining[0]['id'], 'prompt': remaining[0]['prompt'], 'duration': 8, 'character_ids': []},
+        {'id': remaining[1]['id'], 'prompt': remaining[1]['prompt'], 'duration': 12, 'character_ids': []}], state['revision'])
+    state = characters.reconfirm_storyboard(pid, workflow.get(pid)['revision'])
+    assert state['storyboard_reconfirmed'] is True
