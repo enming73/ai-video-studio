@@ -44,7 +44,11 @@ def test_guided_api_draft_confirmation_and_render_gate(api):
     assert api.post(base + '/storyboard/confirm', json={'revision': 0}).status_code == 400
     assert api.post(base + '/storyboard/confirm', json={'revision': r.json()['revision']}).status_code == 200
     assert api.post(base + '/render', json={'revision': 2}).status_code == 400
-    assert api.post(base + '/shots/2/preview', json={}).status_code == 400
+    preview = api.post(base + '/shots/2/preview', json={})
+    assert preview.status_code == 200
+    assert preview.json()['provider'] == 'mock'
+    assert preview.json()['model'] == 'mock'
+    assert preview.json()['first_frame_id'] is None
 
 
 def test_legacy_project_is_not_guided_by_default(api):

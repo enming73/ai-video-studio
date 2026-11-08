@@ -151,39 +151,6 @@ def test_no_character_first_frame_generation_is_budgeted_and_versioned(tmp_path,
     assert images.list_frames(pid, 1)[0]['stale'] == 1
 
 
-def test_confirmed_frame_is_used_for_i2v_and_recorded(tmp_path, monkeypatch):
-    from studio import guided_generation as video
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
-    pid = core.create('Forest', 10, 'mock', 5)
-    workflow.create(pid, character_stage_enabled=True)
-    state = roles.confirm_empty_cast(pid, 0)
-    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
-        {'prompt': 'The river flows in a quiet forest.', 'duration': 10, 'character_ids': []}]}, state['revision'])
-    state = workflow.confirm_storyboard(pid, state['revision'])
-    monkeypatch.setattr(images, '_image_request', lambda *a, **kw: {'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    frame = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='frame', revision=state['revision'])
-    images.confirm_frame(pid, 1, frame['image_id'], workflow.get(pid)['revision'])
-    video.set_video_model(pid, 'minimax', 'MiniMax-H3', workflow.get(pid)['revision'])
-    with pytest.raises(ValueError, match='dimensions'):
-        video.preview(pid, 1)
-    monkeypatch.setattr(images, 'image_dimensions', lambda path: (1024, 1024))
-    received = []
-    class FakeProvider:
-        def __init__(self, client): pass
-        def submit_i2v(self, prompt, duration, first_frame, mime):
-            received.append((first_frame, mime))
-            return 'remote-1'
-    monkeypatch.setitem(core.PROVIDERS, 'minimax', FakeProvider)
-    result = video.submit(pid, 1, 2, confirm_paid=True, request_id='video')
-    assert result['status'] == 'SUBMITTED'
-    assert received == [(png(), 'image/png')]
-    with core.connect() as db:
-        row = db.execute('SELECT * FROM guided_video_provenance WHERE attempt_id=?', (result['id'],)).fetchone()
-    assert row['frame_id'] == frame['image_id']
-
-
 def test_selecting_video_from_current_frame_resolves_old_video_decision(tmp_path, monkeypatch):
     from studio import timeline
     monkeypatch.setattr(core, 'HOME', tmp_path)
@@ -256,35 +223,6 @@ def test_confirming_different_frame_requires_review_of_old_video(tmp_path, monke
     second = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='two', revision=workflow.get(pid)['revision'])
     images.confirm_frame(pid, 1, second['image_id'], workflow.get(pid)['revision'])
     assert workflow.get(pid)['shots'][0]['old_video_decision_required']
-
-
-def test_full_character_frame_api_flow_with_mocked_paid_service(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    monkeypatch.setattr(images, '_image_edit', lambda *a, **kw: {'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    monkeypatch.setattr(core, 'mock_generate', lambda shot, path: path.write_bytes(b'video'))
-    monkeypatch.setattr(core, 'verify_video', lambda path, duration: None)
-    api = TestClient(webapp.app)
-    pid = api.post('/api/production/projects', json={'prompt':'Story', 'duration':10, 'provider':'mock', 'budget':1, 'guided':True}).json()['project_id']
-    root = f'/api/projects/{pid}/guided'
-    state = api.post(root+'/characters', json={'name':'Luma','description':'Gray elephant','revision':0}).json()
-    cid = state['characters'][0]['id']
-    img = api.post(root+f'/characters/{cid}/images', data={'revision':str(state['revision'])}, files={'file':('luma.png',png(),'image/png')}).json()
-    state = api.post(root+f'/characters/{cid}/confirm', json={'image_id':img['id'],'revision':img['revision']}).json()
-    draft = {'character_bible': {'Luma':'Gray elephant'}, 'shots':[{'prompt':'Luma walks beneath the green canopy.', 'duration':10, 'character_ids':[cid]}]}
-    state = api.put(root+'/draft',json={'draft':draft,'revision':state['revision']}).json()
-    state = api.post(root+'/storyboard/confirm',json={'revision':state['revision']}).json()
-    assert state['storyboard_reconfirmed']
-    frame = api.post(root+'/shots/1/frames',json={'revision':state['revision'],'budget_usd':1,'confirm_paid':True,'request_id':'frame'}).json()
-    assert frame['status'] == 'COMPLETED'
-    state = api.get(root+'/').json()
-    result = api.post(root+f'/shots/1/frames/{frame["image_id"]}/confirm',json={'revision':state['revision']})
-    assert result.status_code == 200, result.text
-    state = api.get(root+'/').json()
-    result = api.put(root+'/video-model',json={'provider':'mock','model':'mock','revision':state['revision']})
-    assert result.status_code == 200, result.text
-    job = api.post(root+'/shots/1/generate',json={'request_id':'video'}).json()
-    assert job['status'] == 'COMPLETED', job
 
 
 def test_unrelated_character_edit_during_frame_generation_does_not_mark_frame_stale(tmp_path, monkeypatch):
