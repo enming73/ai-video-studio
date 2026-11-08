@@ -1,10 +1,45 @@
 """FastAPI adapter for the opt-in guided workflow."""
 import json
-from fastapi import APIRouter, HTTPException
+import os
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, guided_generation, guided_storyboard, guided_workflow
+from . import guided_images, guided_characters
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
+
+
+@router.post('/characters/{character_id}/images')
+async def upload_character_image(pid: str, character_id: str, revision: int = Form(...), file: UploadFile = File(...)):
+    import tempfile
+    from pathlib import Path as _Path
+    suffix = _Path(file.filename or '').suffix.lower()
+    if suffix not in guided_images._FORMATS:
+        raise HTTPException(400, 'Unsupported image format')
+    root = core.HOME / pid / 'guided-images' / '.incoming'
+    root.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(dir=root, suffix='.part')
+    total = 0
+    try:
+        with os.fdopen(handle, 'wb') as out:
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > guided_images.MAX_IMAGE_BYTES:
+                    raise HTTPException(400, 'Image exceeds 20 MiB')
+                out.write(chunk)
+        return call(guided_images.import_character_image_file, pid, character_id, file.filename or '',
+                    _Path(temp_name), revision)
+    finally:
+        _Path(temp_name).unlink(missing_ok=True)
+
+
+@router.get('/images/{image_id}')
+def get_character_image(pid: str, image_id: str):
+    path = call(guided_images.image_path, pid, image_id)
+    return FileResponse(path, headers={'Cache-Control': 'no-store'})
 
 
 def call(fn, *args, **kwargs):
@@ -47,6 +82,144 @@ class ShotEdit(Revision):
 
 class Recover(BaseModel):
     remote_id: str | None = None
+
+
+class CharacterEdit(Revision):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=10000)
+
+
+class ImageSelection(Revision):
+    image_id: str = Field(min_length=1, max_length=128)
+
+
+class CastSelection(Revision):
+    character_ids: list[str]
+
+
+class ImageRequest(Revision):
+    model: str = 'gpt-image-2.5-sunburst'
+    budget_usd: float = Field(default=0, ge=0, le=10000)
+    confirm_paid: bool = False
+    request_id: str = Field(default='', max_length=128)
+
+
+class VideoModel(Revision):
+    provider: str
+    model: str
+
+
+class ResolveImage(BaseModel):
+    confirm_checked: bool = False
+
+
+@router.post('/characters')
+def create_character(pid: str, body: CharacterEdit):
+    return call(guided_characters.save_character, pid, None, body.name, body.description, body.revision)
+
+
+@router.get('/characters')
+def characters(pid: str):
+    return call(guided_characters.get, pid)
+
+
+@router.post('/characters/activate')
+def activate_characters(pid: str, body: Revision):
+    return call(guided_characters.activate, pid, body.revision)
+
+
+@router.post('/characters/empty-confirm')
+def empty_cast(pid: str, body: Revision):
+    return call(guided_characters.confirm_empty_cast, pid, body.revision)
+
+
+@router.post('/characters/import-existing')
+def import_existing_characters(pid: str, body: Revision):
+    return call(guided_characters.import_existing_bible, pid, body.revision)
+
+
+@router.patch('/characters/{character_id}')
+def edit_character(pid: str, character_id: str, body: CharacterEdit):
+    return call(guided_characters.save_character, pid, character_id, body.name, body.description, body.revision)
+
+
+@router.get('/characters/{character_id}/images')
+def character_images(pid: str, character_id: str):
+    return call(guided_images.list_character_images, pid, character_id)
+
+
+@router.post('/characters/{character_id}/select')
+def select_character_image(pid: str, character_id: str, body: ImageSelection):
+    return call(guided_characters.select_character_image, pid, character_id, body.image_id, body.revision)
+
+
+@router.post('/characters/{character_id}/confirm')
+def confirm_character(pid: str, character_id: str, body: ImageSelection):
+    return call(guided_characters.confirm_character, pid, character_id, body.image_id, body.revision)
+
+
+@router.post('/characters/{character_id}/images/preview')
+def character_image_preview(pid: str, character_id: str, body: ImageRequest):
+    return call(guided_images.preview_character, pid, character_id, body.model)
+
+
+@router.post('/characters/{character_id}/images/generate')
+def character_image_generate(pid: str, character_id: str, body: ImageRequest):
+    return call(guided_images.generate_character, pid, character_id, body.model, body.budget_usd,
+                confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
+
+
+@router.put('/shots/{seq}/characters')
+def shot_cast(pid: str, seq: int, body: CastSelection):
+    return call(guided_characters.set_shot_characters, pid, seq, body.character_ids, body.revision)
+
+
+@router.post('/storyboard/reconfirm')
+def storyboard_reconfirm(pid: str, body: Revision):
+    return call(guided_characters.reconfirm_storyboard, pid, body.revision)
+
+
+@router.get('/shots/{seq}/frames')
+def frames(pid: str, seq: int):
+    return call(guided_images.list_frames, pid, seq)
+
+
+@router.post('/shots/{seq}/frames/preview')
+def frame_preview(pid: str, seq: int, body: ImageRequest):
+    return call(guided_images.preview_frame, pid, seq, body.model)
+
+
+@router.post('/shots/{seq}/frames')
+def frame_generate(pid: str, seq: int, body: ImageRequest):
+    return call(guided_images.generate_frame, pid, seq, body.model, body.budget_usd,
+                confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
+
+
+@router.post('/shots/{seq}/frames/{image_id}/confirm')
+def frame_confirm(pid: str, seq: int, image_id: str, body: Revision):
+    return call(guided_images.confirm_frame, pid, seq, image_id, body.revision)
+
+
+@router.get('/image-attempts')
+def image_attempts(pid: str):
+    call(guided_characters.get, pid)
+    with core.connect() as db:
+        return [dict(r) for r in db.execute('SELECT id,target_id,kind,request_id,model,budget,status,image_id,error FROM guided_image_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+
+
+@router.post('/image-attempts/{attempt_id}/resolve')
+def resolve_image(pid: str, attempt_id: str, body: ResolveImage):
+    return call(guided_images.resolve_attempt, pid, attempt_id, confirm_checked=body.confirm_checked)
+
+
+@router.put('/video-model')
+def video_model(pid: str, body: VideoModel):
+    return call(guided_generation.set_video_model, pid, body.provider, body.model, body.revision)
+
+
+@router.post('/shots/{seq}/keep-old-video')
+def keep_old_video(pid: str, seq: int, body: Confirm):
+    return call(guided_characters.keep_old_video, pid, seq, body.asset_id, body.revision)
 
 
 @router.get('/')

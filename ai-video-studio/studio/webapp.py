@@ -238,7 +238,7 @@ def production_create(body: CreateProjectRequest):
     pid = api_call(core.create,body.prompt,body.duration,body.provider,body.budget)
     if body.guided:
         from . import guided_workflow
-        api_call(guided_workflow.create,pid)
+        api_call(guided_workflow.create,pid,character_stage_enabled=True)
     return {'project_id':pid,'project':api_call(core.storyboard,pid)['project']}
 
 @app.post('/api/projects/{pid}/production/plan')

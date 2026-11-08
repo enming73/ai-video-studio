@@ -90,3 +90,26 @@ def test_fixed_length_preserves_valid_short_final_shot(tmp_path, monkeypatch):
     pid = core.create('A small elephant', 25, 'mock', 3)
     preview = gs.preview(pid, 'model', 10)
     assert preview['fixed_durations'] == [10, 10, 5]
+
+
+def test_character_enabled_plan_includes_cast_suggestions(project, monkeypatch):
+    from studio import guided_workflow
+    guided_workflow.create(project, character_stage_enabled=True)
+    monkeypatch.setattr(core, '_llm_json', lambda *args: {
+        'character_bible': {'Luma': 'gray elephant', 'Pico': 'blue parrot'},
+        'shots': [{'prompt': 'Luma walks through a dense forest.', 'duration': 8, 'character_names': ['Luma']},
+                  {'prompt': 'Pico flies above the clear river.', 'duration': 12, 'character_names': ['Pico']}]})
+    draft = gs.request_plan(project, 'test-model', 1, confirm_paid=True)
+    assert {c['name'] for c in draft['characters']} == {'Luma', 'Pico'}
+    ids = {c['name']: c['id'] for c in draft['characters']}
+    assert draft['shots'][0]['character_ids'] == [ids['Luma']]
+    assert draft['shots'][1]['character_ids'] == [ids['Pico']]
+
+
+def test_character_enabled_plan_rejects_unknown_cast(project, monkeypatch):
+    from studio import guided_workflow
+    guided_workflow.create(project, character_stage_enabled=True)
+    monkeypatch.setattr(core, '_llm_json', lambda *args: {'character_bible': {'Luma': 'elephant'},
+        'shots': [{'prompt': 'An elephant walks in the deep forest.', 'duration': 20, 'character_names': ['unknown']}]})
+    with pytest.raises(ValueError, match='character'):
+        gs.request_plan(project, 'test-model', 1, confirm_paid=True)

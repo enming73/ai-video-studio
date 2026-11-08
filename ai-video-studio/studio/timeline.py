@@ -75,6 +75,8 @@ def sync(pid):
             asset = db.execute('SELECT id FROM shot_assets WHERE shot_id=? ORDER BY CASE source WHEN \'i2v\' THEN 0 ELSE 1 END, created DESC LIMIT 1', (shot['id'],)).fetchone()
             if asset:
                 db.execute('INSERT INTO timeline_items VALUES (?,?,?,?,?)',(pid,shot['id'],asset['id'],shot['seq'],shot['duration']))
+                if db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
+                    db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid,shot['id']))
     return counts
 
 
@@ -110,6 +112,13 @@ def select(pid, seq, aid):
         if old is None or old['asset_id'] != aid:
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?',(pid,shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?',(pid,))
+            current = db.execute('''SELECT 1 FROM guided_attempts a JOIN guided_video_provenance p ON p.attempt_id=a.id
+                JOIN guided_frame_selection f ON f.project_id=a.project_id AND f.shot_id=a.shot_id AND f.confirmed_frame_id=p.frame_id
+                WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=?''', (pid,shot['id'],aid)).fetchone()
+            if current:
+                db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,shot['id']))
+            elif db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
+                db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid,shot['id']))
         db.execute('INSERT INTO timeline_items VALUES(?,?,?,?,?) ON CONFLICT(project_id,shot_id) DO UPDATE SET asset_id=excluded.asset_id, position=excluded.position, duration=excluded.duration',
                    (pid,shot['id'],aid,shot['seq'],shot['duration']))
     return aid
@@ -141,6 +150,8 @@ def render(pid, output=None, source='selected'):
         if guided:
             if not guided['storyboard_confirmed'] or source != 'selected':
                 raise ValueError('Guided render requires confirmed storyboard and selected assets')
+            from . import guided_characters
+            guided_characters.require_render_ready(db, pid)
             for s in shots:
                 approval=db.execute('''SELECT 1 FROM guided_confirmations c
                     JOIN timeline_items t ON t.project_id=c.project_id AND t.shot_id=c.shot_id

@@ -1,5 +1,6 @@
 """Official cloud endpoints. HTTP calls are only made by --live commands."""
 import os
+import base64
 from dataclasses import dataclass
 from urllib.parse import urlparse
 import httpx
@@ -50,6 +51,17 @@ class MiniMax(Provider):
             'resolution':'768P','duration':duration,'ratio':'16:9'})
         rid = data.get('task_id')
         if not rid: raise ProviderError(f'MiniMax missing task_id: {data}')
+        return str(rid)
+    def submit_i2v(self, prompt, duration, first_frame, mime_type):
+        if mime_type not in ('image/png', 'image/jpeg', 'image/webp') or not isinstance(first_frame, bytes) or not first_frame:
+            raise ValueError('A supported first-frame image is required')
+        image = f'data:{mime_type};base64,' + base64.b64encode(first_frame).decode('ascii')
+        data = request_json(self.client, 'POST', self.base+'/v2/video_generation', headers=self.headers(), json={
+            'model':'MiniMax-H3', 'content':[{'type':'text','text':prompt},
+              {'type':'image_url','image_url':{'url':image},'role':'first_frame'}],
+            'resolution':'768P','duration':duration,'ratio':'adaptive'})
+        rid = data.get('task_id')
+        if not rid: raise ProviderError('MiniMax missing task_id')
         return str(rid)
     def poll(self, remote_id):
         data = request_json(self.client,'GET',self.base+'/v2/query/video_generation/'+remote_id,headers=self.headers())

@@ -63,6 +63,49 @@ def connect():
       project_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL,
       model TEXT NOT NULL, budget_usd REAL NOT NULL, result_json TEXT, error TEXT,
       PRIMARY KEY(project_id, request_id))""")
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS guided_character_settings (
+      project_id TEXT PRIMARY KEY, storyboard_reconfirmed INTEGER NOT NULL DEFAULT 0,
+      empty_cast_confirmed INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS guided_characters (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL, selected_image_id TEXT, confirmed_image_id TEXT,
+      confirmed_description TEXT, UNIQUE(project_id, name COLLATE NOCASE));
+    CREATE TABLE IF NOT EXISTS guided_character_history (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, character_id TEXT NOT NULL,
+      name TEXT NOT NULL, description TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_character_images (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, character_id TEXT NOT NULL,
+      file TEXT NOT NULL, sha256 TEXT NOT NULL, source TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_shot_characters (
+      project_id TEXT NOT NULL, shot_id TEXT NOT NULL, character_id TEXT NOT NULL,
+      PRIMARY KEY(project_id, shot_id, character_id));
+    CREATE TABLE IF NOT EXISTS guided_stale_shots (
+      project_id TEXT NOT NULL, shot_id TEXT NOT NULL, keep_asset_id TEXT,
+      PRIMARY KEY(project_id, shot_id));
+    CREATE TABLE IF NOT EXISTS guided_frame_versions (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, shot_id TEXT NOT NULL,
+      file TEXT NOT NULL, sha256 TEXT NOT NULL, stale INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS guided_frame_characters (
+      frame_id TEXT NOT NULL, character_id TEXT NOT NULL, image_id TEXT NOT NULL,
+      PRIMARY KEY(frame_id, character_id));
+    CREATE TABLE IF NOT EXISTS guided_frame_details (
+      frame_id TEXT PRIMARY KEY, prompt TEXT NOT NULL, model TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_frame_selection (
+      project_id TEXT NOT NULL, shot_id TEXT NOT NULL, confirmed_frame_id TEXT,
+      PRIMARY KEY(project_id, shot_id));
+    CREATE TABLE IF NOT EXISTS guided_shot_cast_reviewed (
+      project_id TEXT NOT NULL, shot_id TEXT NOT NULL, PRIMARY KEY(project_id, shot_id));
+    CREATE TABLE IF NOT EXISTS guided_image_attempts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target_id TEXT NOT NULL,
+      kind TEXT NOT NULL, request_id TEXT NOT NULL, model TEXT NOT NULL,
+      budget REAL NOT NULL, status TEXT NOT NULL, input_json TEXT NOT NULL,
+      image_id TEXT, error TEXT, UNIQUE(project_id, request_id));
+    CREATE TABLE IF NOT EXISTS guided_video_choices (
+      project_id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_video_provenance (
+      attempt_id TEXT PRIMARY KEY, frame_id TEXT NOT NULL, frame_sha256 TEXT NOT NULL, model TEXT NOT NULL);
+    """)
     db.commit()
     return db
 
@@ -197,6 +240,8 @@ def update_shot(pid, seq, prompt):
             raise ValueError("Cannot edit submitted/generated/charged shot; create a new project to preserve assets")
         db.execute("UPDATE shots SET prompt=?,status='PLANNED',error=NULL WHERE id=?",(prompt.strip(),shot["id"]))
         if prompt.strip() != shot['prompt']:
+            from . import guided_characters
+            guided_characters.invalidate_shot(db, pid, shot['id'])
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid,shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
     return shot["id"]

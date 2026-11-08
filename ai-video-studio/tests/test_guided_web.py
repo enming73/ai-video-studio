@@ -15,7 +15,11 @@ def make_project(api):
     r = api.post('/api/production/projects', json={'prompt': 'Elephant in rainforest', 'duration': 20,
                                                   'provider': 'mock', 'budget': 2, 'guided': True})
     assert r.status_code == 201
-    return r.json()['project_id']
+    pid = r.json()['project_id']
+    # Exercise pre-upgrade projects whose character stage was not opted in.
+    with core.connect() as db:
+        db.execute('DELETE FROM guided_character_settings WHERE project_id=?', (pid,))
+    return pid
 
 
 def test_guided_api_default_preview_and_paid_gate(api, monkeypatch):
@@ -85,6 +89,8 @@ def test_guided_mock_end_to_end_with_real_ffmpeg(api):
     response = api.post('/api/production/projects', json={'prompt': 'Two scenes', 'duration': 2,
                                                           'provider': 'mock', 'budget': 0, 'guided': True})
     pid = response.json()['project_id']
+    with core.connect() as db:
+        db.execute('DELETE FROM guided_character_settings WHERE project_id=?', (pid,))
     base = f'/api/projects/{pid}/guided'
     draft = {'character_bible': {}, 'shots': [
         {'prompt': 'A small elephant walks in the forest.', 'duration': 1},
@@ -109,3 +115,14 @@ def test_guided_mock_end_to_end_with_real_ffmpeg(api):
         time.sleep(0.1)
     assert job['status'] == 'completed', job.get('error')
     assert api.get(f'/api/projects/{pid}/renders/{job_id}/video').status_code == 200
+
+
+def test_new_guided_project_exposes_character_stage_and_roles(api):
+    response = api.post('/api/production/projects', json={'prompt': 'Rainforest story', 'duration': 20,
+                                                          'provider': 'mock', 'budget': 0, 'guided': True})
+    pid = response.json()['project_id']
+    base = f'/api/projects/{pid}/guided'
+    assert api.get(base + '/').json()['character_stage_enabled'] is True
+    result = api.post(base + '/characters', json={'name': 'Luma', 'description': 'A gray elephant', 'revision': 0})
+    assert result.status_code == 200, result.text
+    assert result.json()['characters'][0]['name'] == 'Luma'

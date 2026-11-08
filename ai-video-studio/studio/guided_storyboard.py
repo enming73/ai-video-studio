@@ -2,6 +2,7 @@
 import json
 import math
 import os
+from uuid import uuid4
 
 from . import core, provider_capabilities
 
@@ -46,13 +47,18 @@ def request_plan(pid: str, model: str, budget_usd: float, *, confirm_paid: bool,
         raise ValueError('An explicit positive budget and paid confirmation are required')
     with core.connect() as db:
         project = dict(core.project(db, pid))
+        character_stage = bool(db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone())
     prompt = {'brief': project['prompt'], 'total_seconds': details['duration'],
               'allowed_shot_durations_seconds': details['allowed_durations'],
               'required_shot_durations_seconds': details['fixed_durations']}
+    system = ('Create a coherent film storyboard. Return JSON with character_bible object and '
+              'shots array of objects containing prompt and integer duration. Durations must '
+              'be allowed and sum exactly to total_seconds. Character bible maps each character name to a description.')
+    if character_stage:
+        system += (' Every shot must include character_names as an array of exact character bible names, '
+                   'or [] for no characters.')
     result = core._llm_json(
-        'Create a coherent film storyboard. Return JSON with character_bible object and '
-        'shots array of objects containing prompt and integer duration. Durations must '
-        'be allowed and sum exactly to total_seconds.',
+        system,
         json.dumps(prompt, ensure_ascii=False), model,
         base_url or os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1'))
     if not isinstance(result, dict) or not isinstance(result.get('character_bible'), dict):
@@ -65,8 +71,31 @@ def request_plan(pid: str, model: str, budget_usd: float, *, confirm_paid: bool,
                                              details['allowed_durations'])
     if details['fixed_durations'] is not None and [s['duration'] for s in shots] != details['fixed_durations']:
         raise ValueError('Storyboard does not match required fixed shot lengths')
-    return {'character_bible': result['character_bible'], 'shots': [
+    draft = {'character_bible': result['character_bible'], 'shots': [
         {'prompt': s['prompt'].strip(), 'duration': s['duration']} for s in shots]}
+    if character_stage:
+        roles = []
+        names = {}
+        for name, description in result['character_bible'].items():
+            if not isinstance(name, str) or not name.strip() or name.strip().casefold() in names:
+                raise ValueError('Invalid or duplicate character name')
+            if isinstance(description, dict):
+                description = json.dumps(description, ensure_ascii=False)
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError('Invalid character description')
+            cid = uuid4().hex
+            names[name.strip().casefold()] = cid
+            roles.append({'id': cid, 'name': name.strip(), 'description': description.strip()})
+        for src, dst in zip(shots, draft['shots']):
+            selected = src.get('character_names')
+            if not isinstance(selected, list) or any(not isinstance(x, str) or x.casefold() not in names for x in selected):
+                raise ValueError('Unknown or missing shot character list')
+            ids = [names[x.casefold()] for x in selected]
+            if len(set(ids)) != len(ids):
+                raise ValueError('Duplicate shot character')
+            dst['character_ids'] = ids
+        draft['characters'] = roles
+    return draft
 
 
 def save_plan(pid: str, model: str, draft: dict) -> int:

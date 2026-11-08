@@ -1,9 +1,11 @@
 # AI Video Studio + VBench shared Provider Core
 
 For the opt-in LLM storyboard and sequential production workflow, see
-[the guided workflow guide](docs/guided-workflow.md). Live CLI calls for
-storyboard, narration, speech and reference images now also require an explicit
-per-call `--budget`; these reservations are not provider-enforced spend caps.
+[the guided workflow guide](docs/guided-workflow.md). That guide also covers
+character styling, approved first frames and image-to-video generation. Live CLI
+calls for storyboard, narration, speech and reference images now also require an
+explicit per-call `--budget`; these reservations are not provider-enforced spend
+caps.
 
 This repository contains Studio, VBench, and their shared provider core. The
 v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
