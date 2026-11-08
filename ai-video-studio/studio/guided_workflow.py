@@ -180,8 +180,9 @@ def edit_shot(pid: str, seq: int, prompt: str, revision: int) -> dict:
         if not shot:
             raise ValueError('Unknown shot')
         if prompt.strip() != shot['prompt']:
-            from . import guided_characters
+            from . import guided_characters, guided_boundaries
             guided_characters.invalidate_shot(db, pid, shot['id'])
+            guided_boundaries.invalidate_for_shot(db, pid, shot['id'])
             db.execute('UPDATE shots SET prompt=? WHERE id=?', (prompt.strip(), shot['id']))
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))

@@ -96,6 +96,8 @@ def _invalidate_character(db, pid, cid):
     db.execute('DELETE FROM guided_frame_selection WHERE project_id=? AND confirmed_frame_id IN (SELECT frame_id FROM guided_frame_characters WHERE character_id=?)', (pid, cid))
     for row in db.execute('SELECT shot_id FROM guided_shot_characters WHERE project_id=? AND character_id=?', (pid, cid)):
         db.execute('INSERT INTO guided_stale_shots(project_id,shot_id,keep_asset_id) VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid, row['shot_id']))
+    from . import guided_boundaries
+    guided_boundaries.invalidate_for_character(db, pid, cid)
 
 
 def invalidate_shot(db, pid, shot_id):
@@ -103,6 +105,8 @@ def invalidate_shot(db, pid, shot_id):
     db.execute('UPDATE guided_frame_versions SET stale=1 WHERE project_id=? AND shot_id=?', (pid, shot_id))
     db.execute('DELETE FROM guided_frame_selection WHERE project_id=? AND shot_id=?', (pid, shot_id))
     db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid, shot_id))
+    from . import guided_boundaries
+    guided_boundaries.invalidate_for_shot(db, pid, shot_id)
 
 
 def confirm_character(pid: str, character_id: str, image_id: str, revision: int) -> dict:
@@ -208,6 +212,8 @@ def set_shot_characters(pid: str, seq: int, character_ids: list[str], revision: 
         previous = {r['character_id'] for r in db.execute('SELECT character_id FROM guided_shot_characters WHERE project_id=? AND shot_id=?', (pid, shot['id']))}
         reviewed = db.execute('SELECT 1 FROM guided_shot_cast_reviewed WHERE project_id=? AND shot_id=?', (pid, shot['id'])).fetchone()
         if previous != set(character_ids):
+            from . import guided_boundaries
+            guided_boundaries.invalidate_for_shot(db, pid, shot['id'])
             db.execute('UPDATE guided_frame_versions SET stale=1 WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             db.execute('DELETE FROM guided_frame_selection WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid, shot['id']))

@@ -347,3 +347,29 @@ def mark_affected(db, pid: str, boundary_id: str) -> list[str]:
 def shot_ready(db, pid: str, shot_id: str) -> bool:
     start, end = for_shot(db, pid, shot_id)
     return ready(db, pid, start['id']) and ready(db, pid, end['id'])
+
+
+def invalidate_for_shot(db, pid: str, shot_id: str) -> None:
+    shot = db.execute('SELECT seq FROM shots WHERE project_id=? AND id=?', (pid, shot_id)).fetchone()
+    if not shot:
+        return
+    boundaries = db.execute('SELECT id FROM guided_boundaries WHERE project_id=? AND active=1 AND position IN (?,?)',
+                            (pid, shot['seq'] - 1, shot['seq'])).fetchall()
+    for boundary in boundaries:
+        db.execute('UPDATE guided_boundary_versions SET stale=1 WHERE project_id=? AND boundary_id=?',
+                   (pid, boundary['id']))
+        db.execute('UPDATE guided_boundaries SET confirmed_image_id=NULL WHERE id=? AND project_id=?',
+                   (boundary['id'], pid))
+        mark_affected(db, pid, boundary['id'])
+
+
+def invalidate_for_character(db, pid: str, character_id: str) -> None:
+    boundary_ids = [row['boundary_id'] for row in db.execute(
+        'SELECT DISTINCT boundary_id FROM guided_boundary_versions WHERE id IN '
+        '(SELECT frame_id FROM guided_boundary_characters WHERE character_id=?)', (character_id,)).fetchall()]
+    db.execute('UPDATE guided_boundary_versions SET stale=1 WHERE project_id=? AND id IN '
+               '(SELECT frame_id FROM guided_boundary_characters WHERE character_id=?)', (pid, character_id))
+    db.execute('UPDATE guided_boundaries SET confirmed_image_id=NULL WHERE project_id=? AND confirmed_image_id IN '
+               '(SELECT frame_id FROM guided_boundary_characters WHERE character_id=?)', (pid, character_id))
+    for boundary_id in boundary_ids:
+        mark_affected(db, pid, boundary_id)

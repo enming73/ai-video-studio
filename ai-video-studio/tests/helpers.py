@@ -26,11 +26,11 @@ def attach_video(pid, shot, first_id, last_id):
     return path
 
 
-def add_version(pid, boundary_id, name, size='1536x1024', stale=False):
+def add_version(pid, boundary_id, name, size='1536x1024', stale=False, references=None):
     directory = Path(core.HOME) / pid / 'guided-images'
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f'{name}.png'
     make_png(path, size)
     with core.connect() as db:
         return boundaries.insert_version(db, pid, boundary_id, path, stale=stale,
-                                         prompt='p', model='test', references=[])
+                                         prompt='p', model='test', references=references or [])
