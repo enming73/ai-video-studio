@@ -18,6 +18,7 @@ test('a shot is ready when both shared boundaries are confirmed', () => {
 
 test('a shot is ready without a boundary stage', () => {
   assert.equal(shotReady({}, null), true);
+  assert.equal(shotReady({}, []), true);
 });
 
 test('character stage requires confirmed roles and explicit shot cast', () => {

@@ -16,7 +16,7 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
   const shotsCount = state.shots.length;
   const affectedSeqs = [boundary.position, boundary.position + 1].filter(seq => seq >= 1 && seq <= shotsCount);
   const affectedNames = affectedSeqs.map(seq => `镜头 ${seq}`).join('、');
-  const is16x9 = f => { const d = dims[f.id]; if (!d?.w || !d?.h) return true; return Math.abs(d.w / d.h - 16 / 9) <= 0.01; };
+  const is16x9 = f => { const d = dims[f.id]; if (!d || !d.w || !d.h) return false; return Math.abs(d.w / d.h - 16 / 9) <= 0.01; };
 
   return <section className="guided-card guided-boundary-editor">
     <div className="guided-card-head"><h4>边界 B{boundary.position} · {boundary.confirmed ? '已确认' : '待确认'}</h4>

@@ -65,12 +65,12 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
   const selectedBoundary = boundaries.find(b => b.id === boundaryId) || null;
   const boundaryById = id => boundaries.find(b => b.id === id);
   const structureTotal = structure?.reduce((n,s) => n + (Number(s.duration) || 0), 0) || 0;
-  const structureValid = !!structure?.length && structure.every(s => s.prompt?.trim() && Number.isInteger(s.duration) && s.duration > 0);
+  const structureValid = !!structure?.length && structure.every(s => s.prompt?.trim() && Number.isInteger(Number(s.duration)) && Number(s.duration) > 0);
   const openStructure = () => setStructure(state.shots.map(s => ({id: s.id, prompt: s.prompt, duration: s.duration, character_ids: s.character_ids || []})));
   const structureRevise = (index, field, value) => setStructure(d => d.map((s,i) => i === index ? {...s,[field]:value} : s));
   const structureRemove = index => setStructure(d => d.filter((_,i) => i !== index));
   const submitStructure = async () => {const result = await call(root + '/structure', 'PUT', {revision: state.revision,
-    shots: structure.map(s => ({id: s.id, prompt: s.prompt, duration: s.duration, character_ids: s.character_ids || []}))});
+    shots: structure.map(s => ({id: s.id, prompt: s.prompt, duration: Number(s.duration), character_ids: s.character_ids || []}))});
     setStructure(null); setState(result); await refresh(true);};
   const allConfirmed = !!state?.shots.length && state.shots.every(s => s.confirmed && !s.old_video_decision_required)
     && (!state?.character_stage_enabled || state.storyboard_reconfirmed);
@@ -118,7 +118,7 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
       {state.character_stage_enabled && boundaries.length > 0 ? <div className="guided-boundary-strip">
         {boundaries.map((b, i) => <React.Fragment key={b.id}>
           <button className={`boundary${b.confirmed ? ' confirmed' : ''}${boundaryId === b.id ? ' active' : ''}`} title={`边界 B${b.position} · ${b.candidate_count} 个候选`}
-            onClick={() => setBoundaryId(b.id)}>B{i}{b.confirmed ? ' ✓' : ''}</button>
+            onClick={() => setBoundaryId(b.id)}>B{b.position}{b.confirmed ? ' ✓' : ''}</button>
           {i < state.shots.length && (() => { const s = state.shots[i]; const ready = shotReady(s, boundaries);
             return <button className={`shot${s.confirmed ? ' confirmed' : ''}${seq === s.seq ? ' active' : ''}`}
               onClick={() => setSeq(s.seq)}>镜头 {s.seq}{s.confirmed ? ' ✓' : ready ? ' · 边界就绪' : ' · 待边界'}</button>; })()}
@@ -135,6 +135,10 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
                 {b && <button onClick={() => setBoundaryId(b.id)}>编辑</button>}</span>; })}
           </div>
           <p>确认起始与结束边界帧后，本镜头才能生成视频。已有视频会保留并标记为旧版本。</p></>}
+        {state.character_stage_enabled&&shot.old_video_decision_required&&<div className="guided-warning">此镜头已有视频早于最近的边界帧变更（旧版本或来源未知）。视频会保留，不会被删除或改写。
+          <button disabled={!shot.asset_id} onClick={()=>run(async()=>{
+            if(!window.confirm('确认继续使用当前旧视频？它会被保留并标记为旧版本，不会被删除或改写。'))return;
+            await call(root+`/shots/${shot.seq}/keep-old-video`,'POST',{asset_id:shot.asset_id,revision:state.revision});await refresh(true);})}>继续使用当前旧视频</button></div>}
         {state.character_stage_enabled&&state.storyboard_reconfirmed&&<CastReview shot={shot} roles={castState?.characters||[]} state={state} root={root} call={call} run={run} refresh={refresh}/>}
         <label>镜头描述<textarea rows="3" value={prompt} onChange={e=>{setPrompt(e.target.value);setShotPreview(null);}} /></label>
         <button disabled={busy || !prompt.trim() || prompt===shot.prompt} onClick={()=>run(async()=>{
@@ -173,7 +177,7 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
         {structure.map((s,i) => { const existing = state.shots.find(x => x.id === s.id); const hasAsset = !!existing?.asset_id;
           return <article className="guided-card" key={s.id || `new-${i}`}><h4>镜头 {i+1}{s.id ? '' : '（新增）'}{hasAsset ? ' · 已有素材' : ''}</h4>
             <label>镜头描述<textarea rows="2" value={s.prompt} onChange={e=>structureRevise(i,'prompt',e.target.value)} /></label>
-            <div className="fields"><label>时长（秒）<input type="number" min="1" value={s.duration} disabled={hasAsset} onChange={e=>structureRevise(i,'duration',Number(e.target.value))} />
+            <div className="fields"><label>时长（秒）<input type="number" min="1" value={s.duration} disabled={hasAsset} onChange={e=>structureRevise(i,'duration',e.target.value)} />
               {hasAsset && <span className="muted">归档并重建</span>}</label>
               <button onClick={()=>structureRemove(i)}>删除镜头</button></div>
             {state.character_stage_enabled && <fieldset><legend>出场角色</legend>
@@ -182,7 +186,7 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
           </article>; })}
         <p>总时长 {structureTotal} / {project?.duration} 秒{structureTotal !== project?.duration ? ' · 需与项目时长一致' : ''}</p>
         <button disabled={busy} onClick={()=>setStructure(d=>[...d,{id:null,prompt:'',duration:1,character_ids:[]}])}>＋ 添加镜头</button>{' '}
-        <button disabled={busy || !structureValid} onClick={()=>run(submitStructure)}>提交结构调整</button>{' '}
+        <button disabled={busy || !structureValid || structureTotal !== project?.duration} onClick={()=>run(submitStructure)}>提交结构调整</button>{' '}
         <button disabled={busy} onClick={()=>setStructure(null)}>取消</button>
       </> : <p><button onClick={openStructure}>调整分镜结构（增删镜头 / 修改时长）</button></p>}
       <h3>④ 渲染</h3><button disabled={busy || !allConfirmed} onClick={()=>run(async()=>setRender(await call(root+'/render','POST',{revision:state.revision})))}>渲染已确认镜头</button>

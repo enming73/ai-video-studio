@@ -7,7 +7,7 @@ export function validateDraft(draft, total, allowed) {
 }
 
 export function shotReady(shot, boundaries) {
-  if (!boundaries) return true;
+  if (!boundaries?.length) return true;
   const byId = new Map(boundaries.map(b => [b.id, b]));
   const start = byId.get(shot?.start_boundary_id);
   const end = byId.get(shot?.end_boundary_id);
