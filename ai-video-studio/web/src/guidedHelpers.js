@@ -10,3 +10,14 @@ export function accessibleShot(shots, seq) {
   const shot = shots.find(s => s.seq === seq);
   return !!shot && (shot.confirmed || shots.filter(s => s.seq < seq).every(s => s.confirmed));
 }
+
+export function castComplete(enabled, cast, draft) {
+  if (!enabled) return true;
+  if (!cast || !draft?.shots?.length) return false;
+  const rolesConfirmed = cast.characters.length ? cast.characters.every(c=>c.confirmed) : cast.empty_cast_confirmed;
+  return !!rolesConfirmed && draft.shots.every(s=>Array.isArray(s.character_ids) && s.character_ids.every(id=>cast.characters.some(c=>c.id===id)));
+}
+
+export function frameVideoReady(enabled, storyboardConfirmed, shot, videoModel) {
+  return !enabled || !!(storyboardConfirmed && shot?.confirmed_frame_id && videoModel);
+}

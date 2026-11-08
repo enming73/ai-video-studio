@@ -1,5 +1,7 @@
 """One immutable output and one durable submission record per guided attempt."""
 import math
+import hashlib
+import mimetypes
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -7,7 +9,7 @@ from uuid import uuid4
 import httpx
 from dotenv import load_dotenv
 
-from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities
+from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities, guided_characters, guided_images
 
 _RATES = {'minimax': 'MINIMAX_USD_PER_SECOND', 'wan': 'WAN_USD_PER_SECOND', 'flux': 'FAL_USD_PER_SECOND'}
 _ACTIVE = ('SUBMITTING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
@@ -45,13 +47,49 @@ def preview(pid: str, seq: int) -> dict:
     with core.connect() as db:
         p = dict(core.project(db, pid))
         shot = _shot(db, pid, seq)
-    cap = provider_capabilities.capabilities(p['provider'], guided_storyboard._MODELS[p['provider']])
+        enabled = db.execute('SELECT * FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone()
+        choice = db.execute('SELECT * FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
+        frame = None
+        if enabled:
+            guided_characters.require_confirmed(db, pid)
+            if not enabled['storyboard_reconfirmed']: raise ValueError('Confirm storyboard first')
+            frame = db.execute('''SELECT f.id,f.sha256 FROM guided_frame_selection s JOIN guided_frame_versions f
+                ON f.id=s.confirmed_frame_id AND f.project_id=s.project_id AND f.shot_id=s.shot_id
+                WHERE s.project_id=? AND s.shot_id=?''', (pid, shot['id'])).fetchone()
+            if not frame: raise ValueError('Confirm a first frame before video generation')
+            if not choice: raise ValueError('Select a supported image-to-video model')
+        provider = choice['provider'] if enabled else p['provider']
+        model = choice['model'] if enabled else guided_storyboard._MODELS[provider]
+    if frame:
+        image_path = guided_images.image_path(pid, frame['id'])
+        if provider == 'minimax':
+            width,height = guided_images.image_dimensions(image_path)
+            if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
+                raise ValueError('First-frame image dimensions are unsupported by MiniMax')
+    cap = provider_capabilities.i2v_capabilities(provider, model) if enabled else provider_capabilities.capabilities(provider, model)
     if not cap['verified'] or shot['duration'] not in cap['durations']:
         raise ValueError('Provider duration capability unverified or unsupported')
-    rate = _rate(p['provider'])
+    rate = _rate(provider)
     return {'project_id': pid, 'seq': seq, 'duration': shot['duration'], 'prompt': shot['prompt'],
-            'paid': p['provider'] != 'mock', 'estimated_cost_usd': round(rate * shot['duration'], 6),
+            'provider': provider, 'model': model, 'frame_id': frame['id'] if frame else None,
+            'frame_sha256': frame['sha256'] if frame else None,
+            'paid': provider != 'mock', 'estimated_cost_usd': round(rate * shot['duration'], 6),
             'note': 'Estimated reservation is not a provider-enforced spending cap.'}
+
+
+def set_video_model(pid: str, provider: str, model: str, revision: int) -> dict:
+    cap = provider_capabilities.i2v_capabilities(provider, model)
+    if not cap['verified']: raise ValueError('Image-to-video model capability is unverified')
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._revision(guided_workflow._row(db, pid), revision)
+        guided_characters._enabled(db, pid)
+        shots = db.execute('SELECT duration FROM shots WHERE project_id=?', (pid,)).fetchall()
+        if any(s['duration'] not in cap['durations'] for s in shots):
+            raise ValueError('Existing shot durations are incompatible with this video model')
+        db.execute('INSERT INTO guided_video_choices VALUES (?,?,?) ON CONFLICT(project_id) DO UPDATE SET provider=excluded.provider,model=excluded.model', (pid,provider,model))
+        guided_characters._changed(db, pid)
+    return {'provider':provider, 'model':model, 'revision':revision+1}
 
 
 def attempt(pid: str, attempt_id: str) -> dict:
@@ -63,10 +101,34 @@ def attempt(pid: str, attempt_id: str) -> dict:
         return dict(row)
 
 
+def _mock_frame_video(shot, target, frame, mime_type):
+    suffix = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}.get(mime_type)
+    if not suffix:
+        raise ValueError('Unsupported first-frame type')
+    source = target.with_name('first-frame' + suffix)
+    with source.open('xb') as f:
+        f.write(frame)
+    duration = shot['duration']
+    core.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-loop','1','-i',str(source),
+              '-vf',f'fps=24,scale=1280:720:force_original_aspect_ratio=decrease,'
+                    f'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,trim=duration={duration},setpts=N/(24*TB)',
+              '-frames:v',str(duration*24),'-an','-c:v','libx264','-preset','veryfast',
+              '-pix_fmt','yuv420p',str(target)])
+    core.verify_video(target,duration)
+
+
 def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request_id: str) -> dict:
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Request id required')
     estimate = preview(pid, seq)
+    first_frame = None
+    mime_type = None
+    if estimate['frame_id']:
+        path = guided_images.image_path(pid, estimate['frame_id'])
+        first_frame = path.read_bytes()
+        if hashlib.sha256(first_frame).hexdigest() != estimate['frame_sha256']:
+            raise ValueError('Confirmed first frame changed')
+        mime_type = mimetypes.guess_type(path.name)[0]
     if estimate['paid'] and (confirm_paid is not True or isinstance(budget_usd, bool)
             or not isinstance(budget_usd, (int, float)) or not math.isfinite(budget_usd)
             or budget_usd <= 0 or budget_usd < estimate['estimated_cost_usd']):
@@ -86,18 +148,28 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
             raise ValueError('An earlier attempt is unresolved; recover it before submitting again')
         if shot['prompt'] != estimate['prompt'] or shot['duration'] != estimate['duration']:
             raise ValueError('Shot changed after preview')
+        if estimate['frame_id']:
+            current = db.execute('SELECT confirmed_frame_id FROM guided_frame_selection WHERE project_id=? AND shot_id=?', (pid, shot['id'])).fetchone()
+            choice = db.execute('SELECT provider,model FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
+            if not current or current['confirmed_frame_id'] != estimate['frame_id'] or not choice or choice['provider'] != estimate['provider'] or choice['model'] != estimate['model']:
+                raise ValueError('First frame or video model changed after preview')
         reserved = db.execute('SELECT COALESCE(SUM(reserved_usd),0) FROM guided_attempts WHERE project_id=?', (pid,)).fetchone()[0]
         if estimate['paid'] and reserved + estimate['estimated_cost_usd'] > p['budget'] + 1e-9:
             raise ValueError('Project budget insufficient')
         db.execute('''INSERT INTO guided_attempts(id,project_id,shot_id,request_id,prompt,duration,provider,reserved_usd,status)
                       VALUES (?,?,?,?,?,?,?,?,?)''', (aid, pid, shot['id'], request_id, shot['prompt'], shot['duration'],
-                                                    p['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
-    if p['provider'] == 'mock':
+                                                    estimate['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
+        if estimate['frame_id']:
+            db.execute('INSERT INTO guided_video_provenance VALUES (?,?,?,?)', (aid,estimate['frame_id'],estimate['frame_sha256'],estimate['model']))
+    if estimate['provider'] == 'mock':
         try:
             directory = core.HOME / pid / 'guided-attempts' / aid
             directory.mkdir(parents=True, exist_ok=False)
             target = directory / 'video.mp4'
-            core.mock_generate(shot, target)
+            if first_frame is not None:
+                _mock_frame_video(shot, target, first_frame, mime_type)
+            else:
+                core.mock_generate(shot, target)
             core.verify_video(target, shot['duration'])
             _register(pid, aid, seq, target)
         except Exception as exc:
@@ -105,7 +177,9 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
         return attempt(pid, aid)
     try:
         with httpx.Client(timeout=httpx.Timeout(40, connect=15), follow_redirects=False) as client:
-            remote = core.PROVIDERS[p['provider']](client).submit(shot['prompt'], shot['duration'])
+            provider = core.PROVIDERS[estimate['provider']](client)
+            remote = (provider.submit_i2v(shot['prompt'], shot['duration'], first_frame, mime_type)
+                      if first_frame is not None else provider.submit(shot['prompt'], shot['duration']))
         _update(pid, aid, status='SUBMITTED', remote_id=remote)
     except Exception as exc:
         _update(pid, aid, error=str(exc)[:500])
