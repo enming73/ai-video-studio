@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
-from studio import core, guided_boundaries as boundaries, guided_generation as generation, guided_workflow as workflow, timeline
+from studio import core, guided_boundaries as boundaries, guided_generation as generation, guided_images as images, guided_workflow as workflow, timeline
 from tests.helpers import add_version
 
 
@@ -131,3 +133,57 @@ def test_concurrent_duplicate_request_submits_only_once(project, monkeypatch):
         release.set()
         assert first.result(timeout=5)['status'] == 'SUBMITTED'
     assert len(calls) == 1
+
+
+def test_mock_frame_video_produces_real_two_half_clip(boundary_project):
+    pid, state = boundary_project
+    generation.set_video_model(pid, 'mock', 'mock', workflow.get(pid)['revision'])
+    state = confirm_pair(pid, state, 0, 1)
+    attempt = generation.submit(pid, 1, 0, confirm_paid=False, request_id='real-ffmpeg')
+    assert attempt['status'] == 'COMPLETED'
+    path = Path(attempt['file'])
+    assert path.is_file() and path.stat().st_size > 0
+    core.verify_video(path, state['shots'][0]['duration'])
+
+
+def test_submit_passes_both_boundaries_to_i2v(boundary_project, monkeypatch):
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=5 WHERE id=?', (pid,))
+    generation.set_video_model(pid, 'minimax', 'MiniMax-H3', workflow.get(pid)['revision'])
+    state = confirm_pair(pid, state, 0, 1)
+    first_bytes = images.image_path(pid, state['boundaries'][0]['confirmed_image_id']).read_bytes()
+    last_bytes = images.image_path(pid, state['boundaries'][1]['confirmed_image_id']).read_bytes()
+    received = []
+    class FakeProvider:
+        def __init__(self, client): pass
+        def submit_i2v(self, prompt, duration, first_frame, first_mime, last_frame, last_mime):
+            received.append((prompt, duration, first_frame, first_mime, last_frame, last_mime))
+            return 'remote-1'
+    monkeypatch.setitem(core.PROVIDERS, 'minimax', FakeProvider)
+    attempt = generation.submit(pid, 1, 1, confirm_paid=True, request_id='i2v')
+    assert attempt['status'] == 'SUBMITTED'
+    prompt, duration, first_frame, first_mime, last_frame, last_mime = received[0]
+    assert first_frame == first_bytes
+    assert last_frame == last_bytes
+    assert first_mime == 'image/png'
+    assert last_mime == 'image/png'
+    assert duration == state['shots'][0]['duration']
+
+
+def test_minimax_rejects_undersized_boundary_frame(boundary_project, monkeypatch):
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    pid, state = boundary_project
+    generation.set_video_model(pid, 'minimax', 'MiniMax-H3', workflow.get(pid)['revision'])
+    small_id = add_version(pid, state['boundaries'][0]['id'], 'small', size='192x108')
+    last_id = add_version(pid, state['boundaries'][1]['id'], 'last', size='1536x864')
+    with core.connect() as db:
+        # boundaries.confirm enforces a 256px minimum, so set the confirmed frame
+        # directly to exercise preview's MiniMax dimension guard.
+        db.execute('UPDATE guided_boundaries SET confirmed_image_id=? WHERE id=?',
+                   (small_id, state['boundaries'][0]['id']))
+        db.execute('UPDATE guided_boundaries SET confirmed_image_id=? WHERE id=?',
+                   (last_id, state['boundaries'][1]['id']))
+    with pytest.raises(ValueError, match='dimensions'):
+        generation.preview(pid, 1)
