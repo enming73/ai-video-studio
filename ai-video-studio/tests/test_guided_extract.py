@@ -96,6 +96,30 @@ def test_extract_rejects_unknown_side(boundary_project, tmp_path):
         boundaries.extract_from_asset(pid, 1, 'middle', workflow.get(pid)['revision'])
 
 
+def test_extract_single_frame_video_uses_same_frame_for_both_sides(boundary_project, tmp_path):
+    pid, state = boundary_project
+    path = tmp_path / 'single.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+                    '-i', 'testsrc2=size=1280x720:rate=24', '-frames:v', '1',
+                    '-pix_fmt', 'yuv420p', str(path)], check=True)
+    attach(pid, 1, path)
+    start = boundaries.extract_from_asset(pid, 1, 'start', workflow.get(pid)['revision'])
+    end = boundaries.extract_from_asset(pid, 1, 'end', workflow.get(pid)['revision'])
+    assert images.image_path(pid, start['id']).read_bytes() == images.image_path(pid, end['id']).read_bytes()
+
+
+def test_extract_translates_missing_binary_to_value_error(boundary_project, tmp_path, monkeypatch):
+    pid, state = boundary_project
+    attach(pid, 1, make_video(tmp_path / 'shot-1.mp4'))
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError('ffprobe')
+
+    monkeypatch.setattr(subprocess, 'run', missing)
+    with pytest.raises(ValueError, match='FFmpeg|FFprobe'):
+        boundaries.extract_from_asset(pid, 1, 'end', workflow.get(pid)['revision'])
+
+
 def test_extract_route_and_validation(boundary_project, tmp_path):
     pid, state = boundary_project
     api = TestClient(webapp.app)

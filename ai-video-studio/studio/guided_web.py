@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, guided_generation, guided_storyboard, guided_workflow
-from . import guided_images, guided_characters, guided_boundaries, guided_boundaries, guided_structure
+from . import guided_images, guided_characters, guided_boundaries, guided_structure
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
 

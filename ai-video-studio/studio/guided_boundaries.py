@@ -423,9 +423,12 @@ def shot_ready(db, pid: str, shot_id: str) -> bool:
 
 
 def _frame_count(path: Path) -> int:
-    result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
-                             '-show_entries', 'stream=nb_read_frames', '-of', 'default=nw=1:nk=1',
-                             str(path)], capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+                                 '-show_entries', 'stream=nb_read_frames', '-of', 'default=nw=1:nk=1',
+                                 str(path)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('FFmpeg/FFprobe is required to extract video frames') from exc
     try:
         count = int(result.stdout.strip())
     except ValueError:
@@ -463,15 +466,19 @@ def extract_from_asset(pid: str, seq: int, side: str, revision: int) -> dict:
     path = Path(asset['file'])
     if not path.is_file() or timeline._hash(path) != asset['sha256']:
         raise ValueError('Selected asset missing or changed')
+    core.require_ffmpeg()
     frame = 0 if side == 'start' else _frame_count(path) - 1
-    directory = core.HOME / pid / 'guided-images'
-    directory.mkdir(parents=True, exist_ok=True)
-    temp = directory / (uuid4().hex + '-extract.png')
+    temp = guided_images._safe_path(pid, uuid4().hex + '-extract', '.png')
+    final = None
+    moved = False
     try:
         vf = (f"select=eq(n\\,{frame}),"
               f"scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864")
-        core.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(path),
-                  '-vf', vf, '-frames:v', '1', '-fps_mode', 'passthrough', str(temp)])
+        try:
+            core.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(path),
+                      '-vf', vf, '-frames:v', '1', str(temp)])
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError('Could not extract a frame; FFmpeg is required') from exc
         if not temp.is_file() or guided_images.image_dimensions(temp) != (1536, 864):
             raise ValueError('Could not extract a valid frame')
         raw = temp.read_bytes()
@@ -479,6 +486,9 @@ def extract_from_asset(pid: str, seq: int, side: str, revision: int) -> dict:
         with core.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             guided_workflow._revision(guided_workflow._row(db, pid), revision)
+            if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
+                              (boundary['id'], pid)).fetchone():
+                raise ValueError('Unknown boundary')
             existing = db.execute('SELECT id FROM guided_boundary_versions WHERE project_id=? AND boundary_id=? '
                                   'AND sha256=? LIMIT 1', (pid, boundary['id'], digest)).fetchone()
             if existing:
@@ -487,12 +497,17 @@ def extract_from_asset(pid: str, seq: int, side: str, revision: int) -> dict:
             image_id = uuid4().hex
             final = guided_images._safe_path(pid, image_id, '.png')
             os.replace(temp, final)
+            moved = True
             insert_version(db, pid, boundary['id'], final, stale=False,
                            prompt=f'Extracted {side} frame from asset {asset["id"]}',
                            model='extracted', references=[], version_id=image_id)
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
         return {'id': image_id, 'boundary_id': boundary['id'], 'side': side,
                 'revision': revision + 1, 'deduplicated': False}
+    except Exception:
+        if moved and final is not None:
+            final.unlink(missing_ok=True)
+        raise
     finally:
         temp.unlink(missing_ok=True)
 
