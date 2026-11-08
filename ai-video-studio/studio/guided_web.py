@@ -1,11 +1,12 @@
 """FastAPI adapter for the opt-in guided workflow."""
 import json
 import os
+from typing import Literal
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, guided_generation, guided_storyboard, guided_workflow
-from . import guided_images, guided_characters, guided_boundaries, guided_structure
+from . import guided_images, guided_characters, guided_boundaries, guided_boundaries, guided_structure
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
 
@@ -130,6 +131,10 @@ class Structure(Revision):
 
 class BoundaryConfirm(Revision):
     allow_stale: bool = False
+
+
+class ExtractBoundary(Revision):
+    side: Literal['start', 'end']
 
 
 @router.post('/characters')
@@ -260,6 +265,11 @@ def video_model(pid: str, body: VideoModel):
 @router.post('/shots/{seq}/keep-old-video')
 def keep_old_video(pid: str, seq: int, body: Confirm):
     return call(guided_characters.keep_old_video, pid, seq, body.asset_id, body.revision)
+
+
+@router.post('/shots/{seq}/extract-boundary')
+def extract_boundary(pid: str, seq: int, body: ExtractBoundary):
+    return call(guided_boundaries.extract_from_asset, pid, seq, body.side, body.revision)
 
 
 @router.get('/')

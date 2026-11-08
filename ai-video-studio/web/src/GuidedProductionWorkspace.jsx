@@ -134,7 +134,16 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
               return <span key={label}>{label}边界：{b ? `B${b.position} ${b.confirmed ? '已确认' : '待确认'}` : '—'}
                 {b && <button onClick={() => setBoundaryId(b.id)}>编辑</button>}</span>; })}
           </div>
-          <p>确认起始与结束边界帧后，本镜头才能生成视频。已有视频会保留并标记为旧版本。</p></>}
+          <p>确认起始与结束边界帧后，本镜头才能生成视频。已有视频会保留并标记为旧版本。</p>
+          {shot.asset_id && <div className="fields">
+            <button disabled={busy} onClick={()=>run(async()=>{
+              await call(root+`/shots/${seq}/extract-boundary`,'POST',{side:'start',revision:state.revision});
+              await refresh(true);})}>抽取首帧为边界候选</button>
+            <button disabled={busy} onClick={()=>run(async()=>{
+              await call(root+`/shots/${seq}/extract-boundary`,'POST',{side:'end',revision:state.revision});
+              await refresh(true);})}>抽取尾帧为边界候选</button>
+          </div>}
+          <p>抽取只生成未确认候选，按 16:9 中心裁切，需在边界编辑器中确认；原视频不会被删除或改写。</p></>}
         {state.character_stage_enabled&&shot.old_video_decision_required&&<div className="guided-warning">此镜头已有视频早于最近的边界帧变更（旧版本或来源未知）。视频会保留，不会被删除或改写。
           <button disabled={!shot.asset_id} onClick={()=>run(async()=>{
             if(!window.confirm('确认继续使用当前旧视频？它会被保留并标记为旧版本，不会被删除或改写。'))return;

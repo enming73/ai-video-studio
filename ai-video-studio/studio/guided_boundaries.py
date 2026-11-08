@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -419,6 +420,81 @@ def mark_affected(db, pid: str, boundary_id: str) -> list[str]:
 def shot_ready(db, pid: str, shot_id: str) -> bool:
     start, end = for_shot(db, pid, shot_id)
     return ready(db, pid, start['id']) and ready(db, pid, end['id'])
+
+
+def _frame_count(path: Path) -> int:
+    result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+                             '-show_entries', 'stream=nb_read_frames', '-of', 'default=nw=1:nk=1',
+                             str(path)], capture_output=True, text=True, timeout=30)
+    try:
+        count = int(result.stdout.strip())
+    except ValueError:
+        raise ValueError('Could not read video frames') from None
+    if result.returncode or count <= 0:
+        raise ValueError('Could not read video frames')
+    return count
+
+
+def extract_from_asset(pid: str, seq: int, side: str, revision: int) -> dict:
+    """Add the first/last frame of the shot's selected video as an unconfirmed candidate."""
+    if side not in ('start', 'end'):
+        raise ValueError('side must be start or end')
+    from . import guided_images, guided_workflow, timeline, guided_characters
+    with core.connect() as db:
+        guided_characters._enabled(db, pid)
+        row = guided_workflow._row(db, pid)
+        guided_workflow._revision(row, revision)
+        if not row['storyboard_confirmed']:
+            raise ValueError('Confirm storyboard first')
+        shot = db.execute('SELECT * FROM shots WHERE project_id=? AND seq=? AND archived=0',
+                          (pid, seq)).fetchone()
+        if not shot:
+            raise ValueError('Unknown shot')
+        asset = db.execute('''SELECT a.id,a.file,a.sha256 FROM timeline_items t
+            JOIN shot_assets a ON a.id=t.asset_id
+            WHERE t.project_id=? AND t.shot_id=?''', (pid, shot['id'])).fetchone()
+        if not asset:
+            raise ValueError('Select a video asset first')
+        position = shot['seq'] - 1 if side == 'start' else shot['seq']
+        boundary = db.execute('SELECT id FROM guided_boundaries WHERE project_id=? AND active=1 AND position=?',
+                              (pid, position)).fetchone()
+        if not boundary:
+            raise ValueError('Unknown boundary')
+    path = Path(asset['file'])
+    if not path.is_file() or timeline._hash(path) != asset['sha256']:
+        raise ValueError('Selected asset missing or changed')
+    frame = 0 if side == 'start' else _frame_count(path) - 1
+    directory = core.HOME / pid / 'guided-images'
+    directory.mkdir(parents=True, exist_ok=True)
+    temp = directory / (uuid4().hex + '-extract.png')
+    try:
+        vf = (f"select=eq(n\\,{frame}),"
+              f"scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864")
+        core.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(path),
+                  '-vf', vf, '-frames:v', '1', '-fps_mode', 'passthrough', str(temp)])
+        if not temp.is_file() or guided_images.image_dimensions(temp) != (1536, 864):
+            raise ValueError('Could not extract a valid frame')
+        raw = temp.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        with core.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            guided_workflow._revision(guided_workflow._row(db, pid), revision)
+            existing = db.execute('SELECT id FROM guided_boundary_versions WHERE project_id=? AND boundary_id=? '
+                                  'AND sha256=? LIMIT 1', (pid, boundary['id'], digest)).fetchone()
+            if existing:
+                return {'id': existing['id'], 'boundary_id': boundary['id'], 'side': side,
+                        'revision': revision, 'deduplicated': True}
+            image_id = uuid4().hex
+            final = guided_images._safe_path(pid, image_id, '.png')
+            os.replace(temp, final)
+            insert_version(db, pid, boundary['id'], final, stale=False,
+                           prompt=f'Extracted {side} frame from asset {asset["id"]}',
+                           model='extracted', references=[], version_id=image_id)
+            db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+        return {'id': image_id, 'boundary_id': boundary['id'], 'side': side,
+                'revision': revision + 1, 'deduplicated': False}
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def invalidate_for_shot(db, pid: str, shot_id: str) -> None:
