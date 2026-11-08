@@ -37,7 +37,7 @@ def _hash(path):
 
 def _shots(db, pid):
     core.project(db, pid)
-    return db.execute('SELECT * FROM shots WHERE project_id=? ORDER BY seq', (pid,)).fetchall()
+    return db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq', (pid,)).fetchall()
 
 
 def _register(db, pid, shot, source, file):
@@ -92,7 +92,7 @@ def assets(pid, seq=None):
     with core.connect() as db:
         migrate(db)
         _shots(db,pid)
-        sql='SELECT a.*, s.seq, (t.asset_id=a.id) AS selected FROM shot_assets a JOIN shots s ON s.id=a.shot_id LEFT JOIN timeline_items t ON t.project_id=a.project_id AND t.shot_id=a.shot_id WHERE a.project_id=?'
+        sql='SELECT a.*, s.seq, s.archived, (t.asset_id=a.id) AS selected FROM shot_assets a JOIN shots s ON s.id=a.shot_id LEFT JOIN timeline_items t ON t.project_id=a.project_id AND t.shot_id=a.shot_id WHERE a.project_id=?'
         args=[pid]
         if seq is not None:
             sql+=' AND s.seq=?'; args.append(seq)
@@ -112,9 +112,8 @@ def select(pid, seq, aid):
         if old is None or old['asset_id'] != aid:
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?',(pid,shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?',(pid,))
-            current = db.execute('''SELECT 1 FROM guided_attempts a JOIN guided_video_provenance p ON p.attempt_id=a.id
-                JOIN guided_frame_selection f ON f.project_id=a.project_id AND f.shot_id=a.shot_id AND f.confirmed_frame_id=p.frame_id
-                WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=?''', (pid,shot['id'],aid)).fetchone()
+            from . import guided_boundaries
+            current = guided_boundaries.asset_matches_boundaries(db, pid, shot['id'], aid)
             if current:
                 db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,shot['id']))
             elif db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():

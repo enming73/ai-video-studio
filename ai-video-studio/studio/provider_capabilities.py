@@ -8,15 +8,18 @@ _CAPABILITIES = {
 }
 
 _I2V = {
-    ('mock', 'mock'): (range(1, 31), 'Local mock; no AI video generation'),
-    ('minimax', 'MiniMax-H3'): (range(4, 16), 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create'),
+    ('mock', 'mock'): (range(1, 31), 'Local mock; no AI video generation', True),
+    ('minimax', 'MiniMax-H3'): (range(4, 16), 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create', True),
 }
 
 
 def i2v_capabilities(provider: str, model: str) -> dict:
     item = _I2V.get((provider, model))
-    if item is None: return {'verified': False, 'durations': [], 'source': None}
-    return {'verified': True, 'durations': list(item[0]), 'source': item[1]}
+    if item is None:
+        return {'verified': False, 'durations': [], 'source': None, 'first_last_frame': False}
+    durations, source, first_last_frame = item
+    return {'verified': True, 'durations': list(durations), 'source': source,
+            'first_last_frame': first_last_frame}
 
 
 def capabilities(provider: str, model: str) -> dict:

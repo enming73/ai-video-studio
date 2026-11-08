@@ -1,11 +1,12 @@
 """FastAPI adapter for the opt-in guided workflow."""
 import json
 import os
+from typing import Literal
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, guided_generation, guided_storyboard, guided_workflow
-from . import guided_images, guided_characters
+from . import guided_images, guided_characters, guided_boundaries, guided_structure
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
 
@@ -104,12 +105,50 @@ class ImageRequest(Revision):
     request_id: str = Field(default='', max_length=128)
 
 
+class ImagePreview(BaseModel):
+    model: str = 'gpt-image-2.5-sunburst'
+
+
 class VideoModel(Revision):
     provider: str
     model: str
 
 
 class ResolveImage(BaseModel):
+    confirm_checked: bool = False
+
+
+class StructureShot(BaseModel):
+    id: str | None = None
+    prompt: str = Field(min_length=1, max_length=10000)
+    duration: int = Field(ge=1, le=600, strict=True)
+    character_ids: list[str]
+
+
+class Structure(Revision):
+    shots: list[StructureShot]
+
+
+class BoundaryConfirm(Revision):
+    allow_stale: bool = False
+
+
+class ExtractBoundary(Revision):
+    side: Literal['start', 'end']
+
+
+class PromptSelect(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
+class PromptRequest(Revision):
+    model: str = Field(min_length=1, max_length=200)
+    budget_usd: float = Field(default=0, ge=0, le=10000)
+    confirm_paid: bool = False
+    request_id: str = Field(default='', max_length=128)
+
+
+class PromptResolve(BaseModel):
     confirm_checked: bool = False
 
 
@@ -179,25 +218,46 @@ def storyboard_reconfirm(pid: str, body: Revision):
     return call(guided_characters.reconfirm_storyboard, pid, body.revision)
 
 
-@router.get('/shots/{seq}/frames')
-def frames(pid: str, seq: int):
-    return call(guided_images.list_frames, pid, seq)
+@router.get('/boundaries')
+def boundaries(pid: str):
+    return call(guided_workflow.get, pid)['boundaries'] or []
 
 
-@router.post('/shots/{seq}/frames/preview')
-def frame_preview(pid: str, seq: int, body: ImageRequest):
-    return call(guided_images.preview_frame, pid, seq, body.model)
+@router.get('/boundaries/{boundary_id}/frames')
+def boundary_frames(pid: str, boundary_id: str):
+    return call(guided_boundaries.list_frames, pid, boundary_id)
 
 
-@router.post('/shots/{seq}/frames')
-def frame_generate(pid: str, seq: int, body: ImageRequest):
-    return call(guided_images.generate_frame, pid, seq, body.model, body.budget_usd,
+@router.post('/boundaries/{boundary_id}/frames/preview')
+def boundary_frame_preview(pid: str, boundary_id: str, body: ImagePreview):
+    return call(guided_boundaries.preview, pid, boundary_id, body.model)
+
+
+@router.post('/boundaries/{boundary_id}/frames')
+def boundary_frame_generate(pid: str, boundary_id: str, body: ImageRequest):
+    return call(guided_boundaries.generate, pid, boundary_id, body.model, body.budget_usd,
                 confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
 
 
-@router.post('/shots/{seq}/frames/{image_id}/confirm')
-def frame_confirm(pid: str, seq: int, image_id: str, body: Revision):
-    return call(guided_images.confirm_frame, pid, seq, image_id, body.revision)
+@router.post('/boundaries/{boundary_id}/frames/{image_id}/confirm')
+def boundary_frame_confirm(pid: str, boundary_id: str, image_id: str, body: BoundaryConfirm):
+    return call(guided_boundaries.confirm, pid, boundary_id, image_id, body.revision,
+                allow_stale=body.allow_stale)
+
+
+@router.post('/boundaries/{boundary_id}/frames/{image_id}/crop')
+def boundary_frame_crop(pid: str, boundary_id: str, image_id: str, body: Revision):
+    return call(guided_boundaries.crop, pid, boundary_id, image_id, body.revision)
+
+
+@router.delete('/boundaries/{boundary_id}/confirm')
+def boundary_unconfirm(pid: str, boundary_id: str, body: Revision):
+    return call(guided_boundaries.unconfirm, pid, boundary_id, body.revision)
+
+
+@router.put('/structure')
+def structure(pid: str, body: Structure):
+    return call(guided_structure.apply, pid, [s.model_dump() for s in body.shots], body.revision)
 
 
 @router.get('/image-attempts')
@@ -220,6 +280,44 @@ def video_model(pid: str, body: VideoModel):
 @router.post('/shots/{seq}/keep-old-video')
 def keep_old_video(pid: str, seq: int, body: Confirm):
     return call(guided_characters.keep_old_video, pid, seq, body.asset_id, body.revision)
+
+
+@router.post('/shots/{seq}/extract-boundary')
+def extract_boundary(pid: str, seq: int, body: ExtractBoundary):
+    return call(guided_boundaries.extract_from_asset, pid, seq, body.side, body.revision)
+
+
+@router.get('/boundaries/{boundary_id}/prompt')
+def boundary_prompt(pid: str, boundary_id: str):
+    return call(guided_boundaries.prompt_state, pid, boundary_id)
+
+
+@router.post('/boundaries/{boundary_id}/prompt/preview')
+def boundary_prompt_preview(pid: str, boundary_id: str, body: PromptSelect):
+    return call(guided_boundaries.preview_prompt, pid, boundary_id, body.model)
+
+
+@router.post('/boundaries/{boundary_id}/prompt')
+def boundary_prompt_generate(pid: str, boundary_id: str, body: PromptRequest):
+    return call(guided_boundaries.generate_prompt, pid, boundary_id, body.model, body.budget_usd,
+                confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
+
+
+@router.delete('/boundaries/{boundary_id}/prompt')
+def boundary_prompt_clear(pid: str, boundary_id: str, body: Revision):
+    return call(guided_boundaries.clear_prompt, pid, boundary_id, body.revision)
+
+
+@router.get('/prompt-attempts')
+def prompt_attempts(pid: str):
+    call(guided_workflow.get, pid)
+    return call(guided_boundaries.list_prompt_attempts, pid)
+
+
+@router.post('/prompt-attempts/{attempt_id}/resolve')
+def resolve_prompt(pid: str, attempt_id: str, body: PromptResolve):
+    return call(guided_boundaries.resolve_prompt_attempt, pid, attempt_id,
+                confirm_checked=body.confirm_checked)
 
 
 @router.get('/')

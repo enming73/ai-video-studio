@@ -33,11 +33,19 @@ def get(pid: str) -> dict:
         timeline.migrate(db)
         row = _row(db, pid)
         settings = db.execute('SELECT * FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone()
+        boundary_state = None
+        boundary_by_position = {}
+        if settings:
+            from . import guided_boundaries
+            if row['storyboard_confirmed']:
+                guided_boundaries.backfill_legacy(db, pid)
+            boundary_state = guided_boundaries.list_state(db, pid)
+            boundary_by_position = {b['position']: b for b in boundary_state}
         shots = db.execute('''SELECT s.id, s.seq, s.prompt, s.duration, t.asset_id,
              c.asset_id AS confirmed_asset, c.prompt AS confirmed_prompt
              FROM shots s LEFT JOIN timeline_items t ON t.project_id=s.project_id AND t.shot_id=s.id
              LEFT JOIN guided_confirmations c ON c.project_id=s.project_id AND c.shot_id=s.id
-             WHERE s.project_id=? ORDER BY s.seq''', (pid,)).fetchall()
+             WHERE s.project_id=? AND s.archived=0 ORDER BY s.seq''', (pid,)).fetchall()
         shot_data = []
         for s in shots:
             item = {**dict(s), 'confirmed': bool(s['asset_id'] and s['asset_id'] == s['confirmed_asset']
@@ -54,6 +62,8 @@ def get(pid: str) -> dict:
                 item['confirmed_frame_id'] = frame['confirmed_frame_id'] if frame else None
                 item['old_video_decision_required'] = bool(stale and s['asset_id'] and stale['keep_asset_id'] != s['asset_id'])
                 item['video_provenance'] = dict(provenance) if provenance else None
+                item['start_boundary_id'] = (boundary_by_position.get(s['seq'] - 1) or {}).get('id')
+                item['end_boundary_id'] = (boundary_by_position.get(s['seq']) or {}).get('id')
             shot_data.append(item)
         choice = db.execute('SELECT provider,model FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
         return {'project_id': pid, 'revision': row['revision'], 'character_stage_enabled': bool(settings),
@@ -61,7 +71,7 @@ def get(pid: str) -> dict:
                 'video_model': dict(choice) if choice else None,
                 'draft': json.loads(row['draft_json']) if row['draft_json'] else None,
                 'storyboard_confirmed': bool(row['storyboard_confirmed']),
-                'shots': shot_data}
+                'shots': shot_data, 'boundaries': boundary_state}
 
 
 def save_draft(pid: str, draft: dict, revision: int) -> dict:
@@ -129,6 +139,9 @@ def confirm_storyboard(pid: str, revision: int) -> dict:
         db.execute("UPDATE projects SET status='PLANNED' WHERE id=?", (pid,))
         db.execute('UPDATE guided_projects SET storyboard_confirmed=1,revision=revision+1 WHERE project_id=?', (pid,))
         db.execute('UPDATE guided_character_settings SET storyboard_reconfirmed=1 WHERE project_id=?', (pid,))
+        if db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
+            from . import guided_boundaries
+            guided_boundaries.ensure_for_storyboard(db, pid)
     return get(pid)
 
 
@@ -143,10 +156,6 @@ def confirm_shot(pid: str, seq: int, asset_id: str, revision: int) -> dict:
         shot = db.execute('SELECT * FROM shots WHERE project_id=? AND seq=?', (pid, seq)).fetchone()
         if not shot:
             raise ValueError('Unknown shot')
-        missing = db.execute('''SELECT COUNT(*) FROM shots s LEFT JOIN guided_confirmations c
-            ON c.project_id=s.project_id AND c.shot_id=s.id WHERE s.project_id=? AND s.seq<? AND c.shot_id IS NULL''', (pid, seq)).fetchone()[0]
-        if missing:
-            raise ValueError('Confirm earlier shots first')
         asset = db.execute('''SELECT a.file,a.sha256 FROM timeline_items t JOIN shot_assets a ON a.id=t.asset_id
             WHERE t.project_id=? AND t.shot_id=? AND t.asset_id=?''', (pid,shot['id'],asset_id)).fetchone()
         if not asset or not Path(asset['file']).is_file() or timeline._hash(Path(asset['file'])) != asset['sha256']:
@@ -169,8 +178,9 @@ def edit_shot(pid: str, seq: int, prompt: str, revision: int) -> dict:
         if not shot:
             raise ValueError('Unknown shot')
         if prompt.strip() != shot['prompt']:
-            from . import guided_characters
+            from . import guided_characters, guided_boundaries
             guided_characters.invalidate_shot(db, pid, shot['id'])
+            guided_boundaries.invalidate_for_shot(db, pid, shot['id'])
             db.execute('UPDATE shots SET prompt=? WHERE id=?', (prompt.strip(), shot['id']))
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))

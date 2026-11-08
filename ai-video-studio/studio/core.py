@@ -41,7 +41,8 @@ def connect():
       UNIQUE(project_id, seq), FOREIGN KEY(project_id) REFERENCES projects(id));
     """)
     columns = {row[1] for row in db.execute("PRAGMA table_info(shots)")}
-    for name, kind in [("remote_id", "TEXT"), ("video_url", "TEXT"), ("reserved_usd", "REAL NOT NULL DEFAULT 0")]:
+    for name, kind in [("remote_id", "TEXT"), ("video_url", "TEXT"), ("reserved_usd", "REAL NOT NULL DEFAULT 0"),
+                       ("archived", "INTEGER NOT NULL DEFAULT 0")]:
         if name not in columns:
             db.execute(f"ALTER TABLE shots ADD COLUMN {name} {kind}")
     db.execute("""CREATE TABLE IF NOT EXISTS storyboards (
@@ -104,8 +105,49 @@ def connect():
     CREATE TABLE IF NOT EXISTS guided_video_choices (
       project_id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS guided_video_provenance (
-      attempt_id TEXT PRIMARY KEY, frame_id TEXT NOT NULL, frame_sha256 TEXT NOT NULL, model TEXT NOT NULL);
+      attempt_id TEXT PRIMARY KEY, frame_id TEXT NOT NULL, frame_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+      last_frame_id TEXT, last_frame_sha256 TEXT);
+    CREATE TABLE IF NOT EXISTS guided_boundaries (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      position INTEGER,
+      confirmed_image_id TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      created TEXT NOT NULL,
+      UNIQUE(project_id, position));
+    CREATE TABLE IF NOT EXISTS guided_boundary_versions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      boundary_id TEXT NOT NULL,
+      file TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      stale INTEGER NOT NULL DEFAULT 0,
+      created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_boundary_details (
+      frame_id TEXT PRIMARY KEY,
+      prompt TEXT NOT NULL,
+      model TEXT NOT NULL,
+      created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_boundary_characters (
+      frame_id TEXT NOT NULL,
+      character_id TEXT NOT NULL,
+      image_id TEXT NOT NULL,
+      PRIMARY KEY(frame_id, character_id));
+    CREATE TABLE IF NOT EXISTS guided_boundary_prompts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, boundary_id TEXT NOT NULL,
+      prompt TEXT NOT NULL, source_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+      created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS guided_boundary_prompt_attempts (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, boundary_id TEXT NOT NULL,
+      request_id TEXT NOT NULL, status TEXT NOT NULL, model TEXT NOT NULL,
+      budget_usd REAL NOT NULL, source_sha256 TEXT NOT NULL,
+      result_prompt TEXT, error TEXT, created TEXT NOT NULL,
+      UNIQUE(project_id, request_id));
     """)
+    provenance_columns = {row[1] for row in db.execute("PRAGMA table_info(guided_video_provenance)")}
+    for name, kind in [("last_frame_id", "TEXT"), ("last_frame_sha256", "TEXT")]:
+        if name not in provenance_columns:
+            db.execute(f"ALTER TABLE guided_video_provenance ADD COLUMN {name} {kind}")
     db.commit()
     return db
 

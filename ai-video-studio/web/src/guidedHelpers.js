@@ -6,9 +6,12 @@ export function validateDraft(draft, total, allowed) {
   return '';
 }
 
-export function accessibleShot(shots, seq) {
-  const shot = shots.find(s => s.seq === seq);
-  return !!shot && (shot.confirmed || shots.filter(s => s.seq < seq).every(s => s.confirmed));
+export function shotReady(shot, boundaries) {
+  if (!boundaries?.length) return true;
+  const byId = new Map(boundaries.map(b => [b.id, b]));
+  const start = byId.get(shot?.start_boundary_id);
+  const end = byId.get(shot?.end_boundary_id);
+  return !!(start?.confirmed && end?.confirmed);
 }
 
 export function castComplete(enabled, cast, draft) {
@@ -18,6 +21,6 @@ export function castComplete(enabled, cast, draft) {
   return !!rolesConfirmed && draft.shots.every(s=>Array.isArray(s.character_ids) && s.character_ids.every(id=>cast.characters.some(c=>c.id===id)));
 }
 
-export function frameVideoReady(enabled, storyboardConfirmed, shot, videoModel) {
-  return !enabled || !!(storyboardConfirmed && shot?.confirmed_frame_id && videoModel);
+export function frameVideoReady(enabled, storyboardConfirmed, shot, videoModel, boundaries) {
+  return !enabled || !!(storyboardConfirmed && shotReady(shot, boundaries) && videoModel);
 }

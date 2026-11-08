@@ -3,6 +3,8 @@ import shutil
 import time
 from fastapi.testclient import TestClient
 from studio import core, webapp
+from studio import guided_boundaries as boundaries, guided_workflow as workflow
+from tests.helpers import add_version
 
 
 @pytest.fixture
@@ -44,7 +46,11 @@ def test_guided_api_draft_confirmation_and_render_gate(api):
     assert api.post(base + '/storyboard/confirm', json={'revision': 0}).status_code == 400
     assert api.post(base + '/storyboard/confirm', json={'revision': r.json()['revision']}).status_code == 200
     assert api.post(base + '/render', json={'revision': 2}).status_code == 400
-    assert api.post(base + '/shots/2/preview', json={}).status_code == 400
+    preview = api.post(base + '/shots/2/preview', json={})
+    assert preview.status_code == 200
+    assert preview.json()['provider'] == 'mock'
+    assert preview.json()['model'] == 'mock'
+    assert preview.json()['first_frame_id'] is None
 
 
 def test_legacy_project_is_not_guided_by_default(api):
@@ -126,3 +132,88 @@ def test_new_guided_project_exposes_character_stage_and_roles(api):
     result = api.post(base + '/characters', json={'name': 'Luma', 'description': 'A gray elephant', 'revision': 0})
     assert result.status_code == 200, result.text
     assert result.json()['characters'][0]['name'] == 'Luma'
+
+
+def make_boundary_project(api):
+    response = api.post('/api/production/projects', json={
+        'prompt': 'Elephant in forest', 'duration': 10, 'provider': 'mock', 'budget': 0, 'guided': True})
+    pid = response.json()['project_id']
+    base = f'/api/projects/{pid}/guided'
+    response = api.post(base + '/characters/empty-confirm', json={'revision': 0})
+    response = api.put(base + '/draft', json={'revision': response.json()['revision'], 'draft': {
+        'character_bible': {}, 'shots': [{'prompt': 'An elephant walks.', 'duration': 10, 'character_ids': []}]}})
+    response = api.post(base + '/storyboard/confirm', json={'revision': response.json()['revision']})
+    return pid, response.json(), base
+
+
+def test_boundary_routes(api):
+    pid, state, base = make_boundary_project(api)
+    list_response = api.get(base + '/boundaries')
+    assert list_response.status_code == 200
+    assert [b['position'] for b in list_response.json()] == [0, 1]
+    for position in (0, 1):
+        response = api.post(base + f"/boundaries/{state['boundaries'][position]['id']}/frames/preview", json={})
+        assert response.status_code == 200, response.text
+    assert api.get(base + '/shots/1/frames').status_code == 404
+
+
+def test_structure_route_rejects_invalid_total(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 9, 'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 400
+    assert workflow.get(pid)['shots'][0]['duration'] == 10
+
+
+def test_unconfirm_route(api):
+    pid, state, base = make_boundary_project(api)
+    boundary = state['boundaries'][0]['id']
+    version = add_version(pid, boundary, 'b0', size='1536x864')
+    boundaries.confirm(pid, boundary, version, workflow.get(pid)['revision'])
+    response = api.request('DELETE', base + f'/boundaries/{boundary}/confirm',
+                           json={'revision': workflow.get(pid)['revision']})
+    assert response.status_code == 200
+    assert workflow.get(pid)['boundaries'][0]['confirmed'] is False
+
+
+def test_structure_route_creates_shot_without_id(api):
+    pid, state, base = make_boundary_project(api)
+    old_id = state['shots'][0]['id']
+    body = {'revision': state['revision'], 'shots': [
+        {'prompt': 'An elephant returns.', 'duration': 10, 'character_ids': []}]}
+    response = api.put(base + '/structure', json=body)
+    assert response.status_code == 200, response.text
+    assert len(response.json()['shots']) == 1
+    assert response.json()['shots'][0]['id'] != old_id
+
+
+def test_structure_route_rejects_unhashable_id(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': [], 'prompt': 'An elephant walks.', 'duration': 10, 'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_rejects_non_integer_duration(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 'ten',
+         'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_rejects_numeric_string_duration(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': '10',
+         'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_requires_character_ids(api):
+    pid, state, base = make_boundary_project(api)
+    before = workflow.get(pid)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 10}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+    assert workflow.get(pid) == before

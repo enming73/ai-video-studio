@@ -28,7 +28,7 @@ def test_draft_persists_and_rejects_stale_confirmation(guided):
     assert [s['duration'] for s in core.storyboard(pid)['shots']] == [8, 12]
 
 
-def test_confirm_sequence_and_invalidate_edited_shot_only(guided):
+def test_confirm_shots_in_any_order_invalidate_edited_shot_only(guided):
     pid, root = guided
     state = workflow.save_draft(pid, draft(), 0)
     state = workflow.confirm_storyboard(pid, state['revision'])
@@ -39,10 +39,9 @@ def test_confirm_sequence_and_invalidate_edited_shot_only(guided):
         paths.append(timeline.import_asset(pid, seq, str(path)))
         timeline.select(pid, seq, paths[-1])
     state = workflow.get(pid)
-    with pytest.raises(ValueError):
-        workflow.confirm_shot(pid, 2, paths[1], state['revision'])
-    state = workflow.confirm_shot(pid, 1, paths[0], state['revision'])
     state = workflow.confirm_shot(pid, 2, paths[1], state['revision'])
+    assert state['shots'][1]['confirmed'] and not state['shots'][0]['confirmed']
+    state = workflow.confirm_shot(pid, 1, paths[0], state['revision'])
     assert workflow.render_ready(pid)
     core.update_shot(pid, 1, 'The elephant walks slowly through the forest.')
     state = workflow.get(pid)
