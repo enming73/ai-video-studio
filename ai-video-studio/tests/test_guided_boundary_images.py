@@ -11,7 +11,7 @@ def test_preview_does_not_require_earlier_shots(boundary_project):
     pid, state = boundary_project
     details = boundaries.preview(pid, state['shots'][1]['start_boundary_id'], 'gpt-image-2.5-sunburst')
     assert details['position'] == 1
-    assert 'End of shot 1' in details['prompt']
+    assert 'The outgoing scene is ending' in details['prompt']
 
 
 def test_generated_frame_is_cropped_to_16_9(boundary_project, monkeypatch):

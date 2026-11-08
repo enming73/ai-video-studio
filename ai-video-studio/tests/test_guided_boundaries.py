@@ -31,17 +31,41 @@ def test_confirmed_storyboard_creates_n_plus_one_boundaries(boundary_project):
     assert shots[1]['start_boundary_id'] == state['boundaries'][1]['id']
 
 
-def test_derived_prompts(boundary_project):
+def test_derived_prompts_request_one_frame_and_one_moment(boundary_project):
     pid, state = boundary_project
     first, middle, last = state['boundaries']
     with core.connect() as db:
-        assert boundaries.derive(db, pid, first['id'])['prompt'] == (
-            'Create a cinematic opening frame for shot 1: An elephant walks through the forest.')
-        assert boundaries.derive(db, pid, middle['id'])['prompt'] == (
-            'Create a cinematic transition frame. End of shot 1: An elephant walks through the forest. '
-            'Next: An elephant reaches the river.')
-        assert boundaries.derive(db, pid, last['id'])['prompt'] == (
-            'Create a cinematic closing frame for shot 2: An elephant reaches the river.')
+        opening = boundaries.derive(db, pid, first['id'])['prompt']
+        transition = boundaries.derive(db, pid, middle['id'])['prompt']
+        closing = boundaries.derive(db, pid, last['id'])['prompt']
+    for prompt in (opening, transition, closing):
+        lower = prompt.lower()
+        assert 'single cinematic still photograph' in lower
+        assert 'do not create a storyboard' in lower
+        assert 'collage' in lower
+        assert 'multiple panels' in lower
+        assert 'one unified scene' in lower
+        assert 'character appears only once' in lower
+    assert 'An elephant walks through the forest.' in opening
+    assert 'An elephant walks through the forest.' in transition
+    assert 'An elephant reaches the river.' in transition
+    assert 'An elephant reaches the river.' in closing
+
+
+def test_derived_transition_uses_only_the_cut_moments(boundary_project):
+    pid, state = boundary_project
+    filler = 'FILLER. ' * 80
+    with core.connect() as db:
+        db.execute('UPDATE shots SET prompt=? WHERE project_id=? AND seq=1',
+                   ('OPENING_SENTENCE. ' + filler + 'TAIL_SENTENCE.', pid))
+        db.execute('UPDATE shots SET prompt=? WHERE project_id=? AND seq=2',
+                   ('HEAD_SENTENCE. ' + filler + 'FINAL_SENTENCE.', pid))
+        prompt = boundaries.derive(db, pid, state['boundaries'][1]['id'])['prompt']
+    assert 'TAIL_SENTENCE.' in prompt
+    assert 'HEAD_SENTENCE.' in prompt
+    assert 'OPENING_SENTENCE.' not in prompt
+    assert 'FINAL_SENTENCE.' not in prompt
+    assert len(prompt) < 1200
 
 
 def test_non_character_project_has_no_boundaries(tmp_path, monkeypatch):

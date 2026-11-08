@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -109,6 +110,28 @@ def _references(db, pid: str, shot_ids: list[str]) -> list[dict]:
              'image_id': r['image_id'], 'sha256': r['sha256']} for r in rows]
 
 
+_SINGLE_FRAME = (
+    'A single cinematic still photograph: one frame, one moment, one camera angle, 16:9 widescreen. '
+    'Do not create a storyboard, comic strip, collage, grid, contact sheet, split screen, or multiple panels. '
+    'Show one unified scene, not a sequence. The main character appears only once. '
+    'No text, captions, borders, or watermarks.')
+
+
+_NOISE = re.compile(r'^(全片|本镜头|这一镜|镜头|画面|最后[一二三四五六七八九十\d]*秒|特写)')
+
+
+def _excerpt(text: str, side: str, limit: int = 160, max_sentences: int = 2) -> str:
+    """Keep only the one or two visual beats nearest the cut, not the whole shot."""
+    text = ' '.join(text.split())
+    parts = [part.strip() for part in re.split(r'(?<=[。！？!?\.])', text) if part.strip()]
+    parts = [part for part in parts if not _NOISE.match(part)]
+    if not parts:
+        parts = [text]
+    chosen = parts[:max_sentences] if side == 'start' else parts[-max_sentences:]
+    excerpt = ''.join(chosen)
+    return excerpt[:limit] if side == 'start' else excerpt[-limit:]
+
+
 def derive(db, pid: str, boundary_id: str) -> dict:
     boundary = db.execute('SELECT * FROM guided_boundaries WHERE id=? AND project_id=?',
                           (boundary_id, pid)).fetchone()
@@ -122,14 +145,15 @@ def derive(db, pid: str, boundary_id: str) -> dict:
     if not shots or not 0 <= position <= len(shots):
         raise ValueError('No active shots for this boundary')
     if position == 0:
-        prompt = f"Create a cinematic opening frame for shot 1: {shots[0]['prompt']}"
+        prompt = f"{_SINGLE_FRAME} Opening frame: {_excerpt(shots[0]['prompt'], 'start')}"
         shot_ids = [shots[0]['id']]
     elif position == len(shots):
-        prompt = f"Create a cinematic closing frame for shot {len(shots)}: {shots[-1]['prompt']}"
+        prompt = f"{_SINGLE_FRAME} Closing frame: {_excerpt(shots[-1]['prompt'], 'end')}"
         shot_ids = [shots[-1]['id']]
     else:
-        prompt = (f"Create a cinematic transition frame. End of shot {position}: {shots[position - 1]['prompt']} "
-                  f"Next: {shots[position]['prompt']}")
+        prompt = (f"{_SINGLE_FRAME} The outgoing scene is ending: "
+                  f"{_excerpt(shots[position - 1]['prompt'], 'end')} "
+                  f"The incoming scene is beginning: {_excerpt(shots[position]['prompt'], 'start')}")
         shot_ids = [shots[position - 1]['id'], shots[position]['id']]
     return {'boundary_id': boundary_id, 'position': position, 'prompt': prompt,
             'references': _references(db, pid, shot_ids)}
