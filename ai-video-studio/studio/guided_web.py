@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, guided_generation, guided_storyboard, guided_workflow
-from . import guided_images, guided_characters
+from . import guided_images, guided_characters, guided_boundaries, guided_structure
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
 
@@ -104,6 +104,10 @@ class ImageRequest(Revision):
     request_id: str = Field(default='', max_length=128)
 
 
+class ImagePreview(BaseModel):
+    model: str = 'gpt-image-2.5-sunburst'
+
+
 class VideoModel(Revision):
     provider: str
     model: str
@@ -111,6 +115,14 @@ class VideoModel(Revision):
 
 class ResolveImage(BaseModel):
     confirm_checked: bool = False
+
+
+class Structure(Revision):
+    shots: list[dict]
+
+
+class BoundaryConfirm(Revision):
+    allow_stale: bool = False
 
 
 @router.post('/characters')
@@ -179,25 +191,46 @@ def storyboard_reconfirm(pid: str, body: Revision):
     return call(guided_characters.reconfirm_storyboard, pid, body.revision)
 
 
-@router.get('/shots/{seq}/frames')
-def frames(pid: str, seq: int):
-    return call(guided_images.list_frames, pid, seq)
+@router.get('/boundaries')
+def boundaries(pid: str):
+    return call(guided_workflow.get, pid)['boundaries'] or []
 
 
-@router.post('/shots/{seq}/frames/preview')
-def frame_preview(pid: str, seq: int, body: ImageRequest):
-    return call(guided_images.preview_frame, pid, seq, body.model)
+@router.get('/boundaries/{boundary_id}/frames')
+def boundary_frames(pid: str, boundary_id: str):
+    return call(guided_boundaries.list_frames, pid, boundary_id)
 
 
-@router.post('/shots/{seq}/frames')
-def frame_generate(pid: str, seq: int, body: ImageRequest):
-    return call(guided_images.generate_frame, pid, seq, body.model, body.budget_usd,
+@router.post('/boundaries/{boundary_id}/frames/preview')
+def boundary_frame_preview(pid: str, boundary_id: str, body: ImagePreview):
+    return call(guided_boundaries.preview, pid, boundary_id, body.model)
+
+
+@router.post('/boundaries/{boundary_id}/frames')
+def boundary_frame_generate(pid: str, boundary_id: str, body: ImageRequest):
+    return call(guided_boundaries.generate, pid, boundary_id, body.model, body.budget_usd,
                 confirm_paid=body.confirm_paid, request_id=body.request_id, revision=body.revision)
 
 
-@router.post('/shots/{seq}/frames/{image_id}/confirm')
-def frame_confirm(pid: str, seq: int, image_id: str, body: Revision):
-    return call(guided_images.confirm_frame, pid, seq, image_id, body.revision)
+@router.post('/boundaries/{boundary_id}/frames/{image_id}/confirm')
+def boundary_frame_confirm(pid: str, boundary_id: str, image_id: str, body: BoundaryConfirm):
+    return call(guided_boundaries.confirm, pid, boundary_id, image_id, body.revision,
+                allow_stale=body.allow_stale)
+
+
+@router.post('/boundaries/{boundary_id}/frames/{image_id}/crop')
+def boundary_frame_crop(pid: str, boundary_id: str, image_id: str, body: Revision):
+    return call(guided_boundaries.crop, pid, boundary_id, image_id, body.revision)
+
+
+@router.delete('/boundaries/{boundary_id}/confirm')
+def boundary_unconfirm(pid: str, boundary_id: str, body: Revision):
+    return call(guided_boundaries.unconfirm, pid, boundary_id, body.revision)
+
+
+@router.put('/structure')
+def structure(pid: str, body: Structure):
+    return call(guided_structure.apply, pid, body.shots, body.revision)
 
 
 @router.get('/image-attempts')
