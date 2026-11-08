@@ -10,6 +10,7 @@ _CAPABILITIES = {
 _I2V = {
     ('mock', 'mock'): (range(1, 31), 'Local mock; no AI video generation', True),
     ('minimax', 'MiniMax-H3'): (range(4, 16), 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create', True),
+    ('flux', 'blackforestlabs/flux-3-max/image-to-video'): (range(5, 21), 'https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=blackforestlabs%2Fflux-3-max%2Fimage-to-video', True),
 }
 
 

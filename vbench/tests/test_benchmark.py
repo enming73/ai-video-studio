@@ -52,7 +52,7 @@ def test_flux_poll_uses_model_queue_url(monkeypatch):
     monkeypatch.setenv('FAL_KEY','fake')
     client=FakeClient([{'status':'IN_PROGRESS'}])
     assert Flux(client).poll('uuid').status=='running'
-    assert client.calls[0][1]=='https://queue.fal.run/blackforestlabs/flux-3-max/text-to-video/requests/uuid/status'
+    assert client.calls[0][1]=='https://queue.fal.run/blackforestlabs/flux-3-max/requests/uuid/status'
 
 
 def test_flux_duration_sent_as_integer(monkeypatch):

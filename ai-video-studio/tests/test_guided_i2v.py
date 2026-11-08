@@ -1,7 +1,7 @@
 import base64
 import httpx
 import pytest
-from video_provider_core.providers import MiniMax
+from video_provider_core.providers import MiniMax, Flux
 from studio import core, guided_workflow as workflow, guided_characters as characters, guided_generation as generation, provider_capabilities
 
 
@@ -55,6 +55,37 @@ def test_minimax_capability_declares_first_last_frame():
     assert provider_capabilities.i2v_capabilities('minimax', 'MiniMax-H3')['first_last_frame'] is True
     assert provider_capabilities.i2v_capabilities('mock', 'mock')['first_last_frame'] is True
     assert provider_capabilities.i2v_capabilities('flux', 'x')['verified'] is False
+
+
+def test_flux_i2v_capability():
+    cap = provider_capabilities.i2v_capabilities('flux', 'blackforestlabs/flux-3-max/image-to-video')
+    assert cap['verified'] and cap['first_last_frame']
+    assert cap['durations'] == list(range(5, 21))
+
+
+def test_flux_i2v_submits_uploaded_boundary_frames_and_polls_i2v_route(monkeypatch):
+    import json
+    import sys
+    import types
+    monkeypatch.setenv('FAL_KEY', 'fake')
+    monkeypatch.setitem(sys.modules, 'fal_client', types.SimpleNamespace(
+        upload=lambda data, mime: 'https://v3b.fal.media/' + data.decode()))
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.method == 'POST':
+            return httpx.Response(200, json={'request_id': '123'})
+        return httpx.Response(200, json={'status': 'IN_PROGRESS'})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = Flux(client)
+        assert provider.submit_i2v('A forest', 5, b'first', 'image/png', b'last', 'image/webp') == '123'
+        assert provider.poll('123', model='blackforestlabs/flux-3-max/image-to-video').status == 'running'
+    assert requests[0].url.path == '/blackforestlabs/flux-3-max/image-to-video'
+    payload = json.loads(requests[0].content)
+    assert payload['image_url'] == 'https://v3b.fal.media/first'
+    assert payload['end_image_url'] == 'https://v3b.fal.media/last'
+    assert payload['duration'] == 5
+    assert requests[1].url.path == '/blackforestlabs/flux-3-max/requests/123/status'
 
 
 def test_enabled_guided_project_rejects_video_before_confirmed_frame(tmp_path, monkeypatch):

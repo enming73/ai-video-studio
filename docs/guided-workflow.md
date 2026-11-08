@@ -59,9 +59,11 @@ Character-enabled projects require a confirmed first frame **and** an explicitly
 selected image-to-video model before video generation. The current verified
 option is `MiniMax-H3` (`image_url` with role `first_frame`, 4–15 second integer
 durations); it requires `MINIMAX_API_KEY`. Its documented frame limits are
-checked before submission. Mock remains available for local tests. Flux
-image-to-video exists in the provider's public schema but is not enabled in the
-guided UI because its image-input handling has not been verified end to end.
+checked before submission. Mock remains available for local tests. Flux 3 Max
+image-to-video supports 5–20 second integer durations and first and last frames;
+it requires `FAL_KEY` and a configured `FAL_USD_PER_SECOND`. Input frames are
+uploaded to fal storage, where file URLs are publicly accessible by default.
+Account access, pricing, and live generation must be verified separately.
 An unsupported/unverified model is blocked; the project never silently falls
 back to text-to-video.
 
