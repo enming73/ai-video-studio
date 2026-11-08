@@ -68,6 +68,26 @@ def test_derived_transition_uses_only_the_cut_moments(boundary_project):
     assert len(prompt) < 1200
 
 
+def test_excerpt_keeps_visual_beats_and_drops_camera_noise():
+    assert '陶渊明端起陶杯' in boundaries._excerpt('镜头缓慢环绕人物。陶渊明端起陶杯。', 'start')
+    assert '镜头缓慢环绕' not in boundaries._excerpt('镜头缓慢环绕人物。陶渊明端起陶杯。', 'start')
+    assert '陶渊明端起陶杯' in boundaries._excerpt('镜头缓慢环绕人物。陶渊明端起陶杯。', 'end')
+    assert 'Camera pans' not in boundaries._excerpt('Luma walks. Camera pans left.', 'end')
+    assert 'Luma walks' in boundaries._excerpt('Luma walks. Camera pans left.', 'end')
+
+
+def test_excerpt_joins_english_sentences_with_a_space():
+    assert boundaries._excerpt('Luma walks. The tree is big.', 'start') == 'Luma walks. The tree is big.'
+
+
+def test_excerpt_does_not_split_decimals():
+    assert '3.5 meters.' in boundaries._excerpt('The tree is 3.5 meters. The river is wide.', 'start')
+
+
+def test_excerpt_falls_back_when_every_sentence_is_camera_noise():
+    assert boundaries._excerpt('Camera pans. Cut to a close-up.', 'start')
+
+
 def test_non_character_project_has_no_boundaries(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'HOME', tmp_path)
     pid = core.create('Plain project', 10, 'mock', 0)

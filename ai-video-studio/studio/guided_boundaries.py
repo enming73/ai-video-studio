@@ -113,23 +113,30 @@ def _references(db, pid: str, shot_ids: list[str]) -> list[dict]:
 _SINGLE_FRAME = (
     'A single cinematic still photograph: one frame, one moment, one camera angle, 16:9 widescreen. '
     'Do not create a storyboard, comic strip, collage, grid, contact sheet, split screen, or multiple panels. '
-    'Show one unified scene, not a sequence. The main character appears only once. '
+    'Show one unified scene, not a sequence. The main character appears only once; '
+    'do not repeat the character across separate panels. '
     'No text, captions, borders, or watermarks.')
 
 
-_NOISE = re.compile(r'^(全片|本镜头|这一镜|镜头|画面|最后[一二三四五六七八九十\d]*秒|特写)')
+_NOISE = re.compile(
+    r'^(全片|本镜头|这一镜|镜头|画面|最后[一二三四五六七八九十\d]*秒|特写'
+    r'|cut to|camera|close[- ]?up|wide shot|medium shot|long shot|pan|zoom|dissolve|'
+    r'fade|tracking|dolly|establishing|the (camera|frame|scene))',
+    re.IGNORECASE)
 
 
 def _excerpt(text: str, side: str, limit: int = 160, max_sentences: int = 2) -> str:
     """Keep only the one or two visual beats nearest the cut, not the whole shot."""
     text = ' '.join(text.split())
-    parts = [part.strip() for part in re.split(r'(?<=[。！？!?\.])', text) if part.strip()]
+    parts = [part.strip() for part in
+             re.split(r'(?<=[。！？!?])|(?<=\.)\s+', text) if part.strip()]
     parts = [part for part in parts if not _NOISE.match(part)]
     if not parts:
+        # Last resort: keep the raw text rather than returning an empty prompt.
         parts = [text]
     chosen = parts[:max_sentences] if side == 'start' else parts[-max_sentences:]
-    excerpt = ''.join(chosen)
-    return excerpt[:limit] if side == 'start' else excerpt[-limit:]
+    excerpt = ' '.join(chosen).strip()
+    return excerpt[:limit].strip() if side == 'start' else excerpt[-limit:].strip()
 
 
 def derive(db, pid: str, boundary_id: str) -> dict:
