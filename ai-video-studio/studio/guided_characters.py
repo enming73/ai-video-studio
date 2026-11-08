@@ -237,7 +237,7 @@ def reconfirm_storyboard(pid: str, revision: int) -> dict:
             raise ValueError('Confirm the draft storyboard first')
         missing = db.execute('''SELECT 1 FROM shots s LEFT JOIN guided_shot_cast_reviewed r
             ON r.project_id=s.project_id AND r.shot_id=s.id
-            WHERE s.project_id=? AND r.shot_id IS NULL LIMIT 1''', (pid,)).fetchone()
+            WHERE s.project_id=? AND s.archived=0 AND r.shot_id IS NULL LIMIT 1''', (pid,)).fetchone()
         if missing: raise ValueError('Review cast for every shot first')
         db.execute('UPDATE guided_character_settings SET storyboard_reconfirmed=1 WHERE project_id=?', (pid,))
         _changed(db, pid)

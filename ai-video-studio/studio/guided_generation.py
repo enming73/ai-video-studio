@@ -67,6 +67,8 @@ def preview(pid: str, seq: int) -> dict:
     cap = provider_capabilities.i2v_capabilities(provider, model) if enabled else provider_capabilities.capabilities(provider, model)
     if not cap['verified'] or shot['duration'] not in cap['durations']:
         raise ValueError('Provider duration capability unverified or unsupported')
+    if enabled and not cap.get('first_last_frame'):
+        raise ValueError('Provider does not support first and last boundary frames')
     rate = _rate(provider)
     return {'project_id': pid, 'seq': seq, 'duration': shot['duration'], 'prompt': shot['prompt'],
             'provider': provider, 'model': model,

@@ -163,13 +163,30 @@ def insert_version(db, pid: str, boundary_id: str, file: Path, *, stale: bool, p
     return version_id
 
 
+def _adjacent_shot_ids(db, pid: str, position: int) -> list[str]:
+    """Active shot ids a boundary position touches (0-based indices p-1 and p)."""
+    shots = db.execute('SELECT id FROM shots WHERE project_id=? AND archived=0 ORDER BY seq',
+                       (pid,)).fetchall()
+    ids = [s['id'] for s in shots]
+    return [ids[idx] for idx in (position - 1, position) if 0 <= idx < len(ids)]
+
+
 def preview(pid: str, boundary_id: str, model: str) -> dict:
     if model != 'gpt-image-2.5-sunburst':
         raise ValueError('Image model capability is unverified')
     from . import guided_images, guided_characters
     with core.connect() as db:
         guided_characters._enabled(db, pid)
+        guided_characters.require_confirmed(db, pid)
+        settings = db.execute('SELECT storyboard_reconfirmed FROM guided_character_settings WHERE project_id=?',
+                              (pid,)).fetchone()
+        if not settings or not settings['storyboard_reconfirmed']:
+            raise ValueError('Confirm the storyboard for the character workflow')
         details = derive(db, pid, boundary_id)
+        for shot_id in _adjacent_shot_ids(db, pid, details['position']):
+            if not db.execute('SELECT 1 FROM guided_shot_cast_reviewed WHERE project_id=? AND shot_id=?',
+                              (pid, shot_id)).fetchone():
+                raise ValueError('Review cast for every adjacent shot first')
     for ref in details['references']:
         guided_images.image_path(pid, ref['image_id'])
     return {'boundary_id': boundary_id, 'position': details['position'], 'model': model,
@@ -279,12 +296,6 @@ def list_frames(pid: str, boundary_id: str) -> list[dict]:
 
 def confirm(pid: str, boundary_id: str, image_id: str, revision: int, *, allow_stale: bool = False) -> dict:
     from . import guided_images, guided_workflow
-    path = guided_images.image_path(pid, image_id)
-    width, height = guided_images.image_dimensions(path)
-    if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
-        raise ValueError('Boundary frame dimensions are unsupported')
-    if abs(width / height - 16 / 9) > 0.01:
-        raise ValueError('Boundary frames must be 16:9; crop the image first')
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         guided_workflow._revision(guided_workflow._row(db, pid), revision)
@@ -294,6 +305,15 @@ def confirm(pid: str, boundary_id: str, image_id: str, revision: int, *, allow_s
             raise ValueError('Unknown boundary image')
         if version['stale'] and not allow_stale:
             raise ValueError('This boundary version is stale; crop or regenerate before confirming')
+    path = guided_images.image_path(pid, image_id)
+    width, height = guided_images.image_dimensions(path)
+    if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
+        raise ValueError('Boundary frame dimensions are unsupported')
+    if abs(width / height - 16 / 9) > 0.01:
+        raise ValueError('Boundary frames must be 16:9; crop the image first')
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._revision(guided_workflow._row(db, pid), revision)
         db.execute('UPDATE guided_boundaries SET confirmed_image_id=? WHERE id=? AND project_id=?',
                    (image_id, boundary_id, pid))
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
@@ -319,7 +339,6 @@ def unconfirm(pid: str, boundary_id: str, revision: int) -> dict:
 
 def crop(pid: str, boundary_id: str, image_id: str, revision: int) -> dict:
     from . import guided_images, guided_workflow, guided_characters
-    source = guided_images.image_path(pid, image_id)
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         guided_workflow._revision(guided_workflow._row(db, pid), revision)
@@ -334,6 +353,7 @@ def crop(pid: str, boundary_id: str, image_id: str, revision: int) -> dict:
         stale = src['stale']
         prompt = detail['prompt'] if detail else ''
         model = detail['model'] if detail else ''
+    source = guided_images.image_path(pid, image_id)
     new_id = uuid4().hex
     target = guided_images._safe_path(pid, new_id, '.png')
     version_id = None
@@ -351,6 +371,27 @@ def crop(pid: str, boundary_id: str, image_id: str, revision: int) -> dict:
     return {'id': version_id, 'revision': revision + 1}
 
 
+def asset_matches_boundaries(db, pid: str, shot_id: str, asset_id: str) -> bool:
+    """True when an asset's recorded video provenance matches the shot's current
+    confirmed start/end boundary frames — the single definition of 'current'."""
+    shot = db.execute('SELECT seq FROM shots WHERE project_id=? AND id=?', (pid, shot_id)).fetchone()
+    if not shot:
+        return False
+    seq = shot['seq']
+    start = db.execute('SELECT confirmed_image_id FROM guided_boundaries WHERE project_id=? AND active=1 AND position=?',
+                       (pid, seq - 1)).fetchone()
+    end = db.execute('SELECT confirmed_image_id FROM guided_boundaries WHERE project_id=? AND active=1 AND position=?',
+                     (pid, seq)).fetchone()
+    start_id = start['confirmed_image_id'] if start else None
+    end_id = end['confirmed_image_id'] if end else None
+    provenance = db.execute('''SELECT p.frame_id, p.last_frame_id FROM guided_attempts a
+        JOIN guided_video_provenance p ON p.attempt_id=a.id
+        WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=? LIMIT 1''',
+        (pid, shot_id, asset_id)).fetchone()
+    return bool(provenance and provenance['frame_id'] == start_id
+                and provenance['last_frame_id'] == end_id)
+
+
 def mark_affected(db, pid: str, boundary_id: str) -> list[str]:
     boundary = db.execute('SELECT * FROM guided_boundaries WHERE id=? AND project_id=?',
                           (boundary_id, pid)).fetchone()
@@ -358,8 +399,6 @@ def mark_affected(db, pid: str, boundary_id: str) -> list[str]:
         return []
     position = boundary['position']
     shots = db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq', (pid,)).fetchall()
-    boundaries = db.execute('SELECT * FROM guided_boundaries WHERE project_id=? AND active=1 ORDER BY position',
-                            (pid,)).fetchall()
     affected = []
     for idx in (position - 1, position):
         if not 0 <= idx < len(shots):
@@ -369,13 +408,7 @@ def mark_affected(db, pid: str, boundary_id: str) -> list[str]:
                               (pid, shot['id'])).fetchone()
         if not selected:
             continue
-        start = boundaries[idx]['confirmed_image_id'] if idx < len(boundaries) else None
-        end = boundaries[idx + 1]['confirmed_image_id'] if idx + 1 < len(boundaries) else None
-        provenance = db.execute('''SELECT p.frame_id, p.last_frame_id FROM guided_attempts a
-            JOIN guided_video_provenance p ON p.attempt_id=a.id
-            WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=? LIMIT 1''',
-            (pid, shot['id'], selected['asset_id'])).fetchone()
-        if provenance is None or provenance['frame_id'] != start or provenance['last_frame_id'] != end:
+        if not asset_matches_boundaries(db, pid, shot['id'], selected['asset_id']):
             db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL',
                        (pid, shot['id']))
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid, shot['id']))
