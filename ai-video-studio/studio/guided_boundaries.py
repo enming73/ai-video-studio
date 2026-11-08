@@ -307,12 +307,14 @@ def generate_prompt(pid: str, boundary_id: str, model: str, budget_usd: float, *
             if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
                               (boundary_id, pid)).fetchone():
                 raise ValueError('Boundary changed during prompt generation')
-            db.execute('INSERT INTO guided_boundary_prompts VALUES (?,?,?,?,?,?,?)',
-                       (uuid4().hex, pid, boundary_id, text, details['source_sha256'],
-                        details['model'], core.now()))
-            db.execute("UPDATE guided_boundary_prompt_attempts SET status='COMPLETED',result_prompt=? "
-                       "WHERE project_id=? AND id=?", (text, pid, aid))
-            db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+            updated = db.execute("UPDATE guided_boundary_prompt_attempts SET status='COMPLETED',result_prompt=? "
+                                 "WHERE project_id=? AND id=? AND status='SUBMITTING'",
+                                 (text, pid, aid))
+            if updated.rowcount == 1:
+                db.execute('INSERT INTO guided_boundary_prompts VALUES (?,?,?,?,?,?,?)',
+                           (uuid4().hex, pid, boundary_id, text, details['source_sha256'],
+                            details['model'], core.now()))
+                db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
     except Exception as exc:
         with core.connect() as db:
             db.execute("UPDATE guided_boundary_prompt_attempts SET status='UNKNOWN',error=? "
@@ -328,6 +330,9 @@ def clear_prompt(pid: str, boundary_id: str, revision: int) -> dict:
         if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
                           (boundary_id, pid)).fetchone():
             raise ValueError('Unknown boundary')
+        db.execute("UPDATE guided_boundary_prompt_attempts SET status='ACKNOWLEDGED' "
+                   "WHERE project_id=? AND boundary_id=? AND status IN ('SUBMITTING','UNKNOWN')",
+                   (pid, boundary_id))
         db.execute('DELETE FROM guided_boundary_prompts WHERE project_id=? AND boundary_id=?',
                    (pid, boundary_id))
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))

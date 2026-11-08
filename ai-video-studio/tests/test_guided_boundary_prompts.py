@@ -118,6 +118,17 @@ def test_prompt_roles_for_opening_and_closing(boundary_project):
     assert closing['payload']['role'] == 'closing'
 
 
+def test_clear_prompt_acknowledges_inflight_attempt(boundary_project):
+    pid, state = boundary_project
+    boundary_id = state['boundaries'][1]['id']
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_boundary_prompt_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   ('inflight', pid, boundary_id, 'req-inflight', 'SUBMITTING', 'gpt-4o-mini',
+                    0.1, 'sha', None, None, core.now()))
+    boundaries.clear_prompt(pid, boundary_id, workflow.get(pid)['revision'])
+    assert boundaries.list_prompt_attempts(pid)[0]['status'] == 'ACKNOWLEDGED'
+
+
 def test_prompt_is_scoped_to_the_project(boundary_project):
     pid, state = boundary_project
     with pytest.raises(ValueError, match='Unknown boundary'):
