@@ -43,7 +43,7 @@ def get(pid: str) -> dict:
              c.asset_id AS confirmed_asset, c.prompt AS confirmed_prompt
              FROM shots s LEFT JOIN timeline_items t ON t.project_id=s.project_id AND t.shot_id=s.id
              LEFT JOIN guided_confirmations c ON c.project_id=s.project_id AND c.shot_id=s.id
-             WHERE s.project_id=? ORDER BY s.seq''', (pid,)).fetchall()
+             WHERE s.project_id=? AND s.archived=0 ORDER BY s.seq''', (pid,)).fetchall()
         shot_data = []
         for s in shots:
             item = {**dict(s), 'confirmed': bool(s['asset_id'] and s['asset_id'] == s['confirmed_asset']

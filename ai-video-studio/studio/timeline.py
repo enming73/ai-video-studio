@@ -37,7 +37,7 @@ def _hash(path):
 
 def _shots(db, pid):
     core.project(db, pid)
-    return db.execute('SELECT * FROM shots WHERE project_id=? ORDER BY seq', (pid,)).fetchall()
+    return db.execute('SELECT * FROM shots WHERE project_id=? AND archived=0 ORDER BY seq', (pid,)).fetchall()
 
 
 def _register(db, pid, shot, source, file):
@@ -92,7 +92,7 @@ def assets(pid, seq=None):
     with core.connect() as db:
         migrate(db)
         _shots(db,pid)
-        sql='SELECT a.*, s.seq, (t.asset_id=a.id) AS selected FROM shot_assets a JOIN shots s ON s.id=a.shot_id LEFT JOIN timeline_items t ON t.project_id=a.project_id AND t.shot_id=a.shot_id WHERE a.project_id=?'
+        sql='SELECT a.*, s.seq, s.archived, (t.asset_id=a.id) AS selected FROM shot_assets a JOIN shots s ON s.id=a.shot_id LEFT JOIN timeline_items t ON t.project_id=a.project_id AND t.shot_id=a.shot_id WHERE a.project_id=?'
         args=[pid]
         if seq is not None:
             sql+=' AND s.seq=?'; args.append(seq)
