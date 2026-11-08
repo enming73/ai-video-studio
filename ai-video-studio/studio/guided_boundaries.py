@@ -102,7 +102,7 @@ def ready(db, pid: str, boundary_id: str) -> bool:
 
 
 def insert_version(db, pid: str, boundary_id: str, file: Path, *, stale: bool, prompt: str,
-                   model: str, references: list[tuple[str, str]]) -> str:
+                   model: str, references: list[tuple[str, str]], version_id: str | None = None) -> str:
     path = Path(file).resolve()
     root = (core.HOME / pid).resolve()
     directory = (root / 'guided-images').resolve()
@@ -112,7 +112,7 @@ def insert_version(db, pid: str, boundary_id: str, file: Path, *, stale: bool, p
     with path.open('rb') as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b''):
             digest.update(chunk)
-    version_id = path.stem
+    version_id = version_id or uuid4().hex
     db.execute('INSERT INTO guided_boundary_versions(id,project_id,boundary_id,file,sha256,stale,created) '
                'VALUES (?,?,?,?,?,?,?)',
                (version_id, pid, boundary_id, str(path), digest.hexdigest(), int(bool(stale)), core.now()))
@@ -204,7 +204,8 @@ def generate(pid: str, boundary_id: str, model: str, budget_usd: float, *, confi
             guided_workflow._row(db, pid)
             stale = int(not _boundary_snapshot_current(db, pid, details))
             version_id = insert_version(db, pid, boundary_id, target, stale=stale, prompt=details['prompt'],
-                                        model=model, references=[(r['id'], r['image_id']) for r in details['references']])
+                                        model=model, references=[(r['id'], r['image_id']) for r in details['references']],
+                                        version_id=image_id)
             db.execute("UPDATE guided_image_attempts SET status='COMPLETED',image_id=? WHERE project_id=? AND id=?",
                        (version_id, pid, aid))
             guided_characters._changed(db, pid)
@@ -243,6 +244,8 @@ def confirm(pid: str, boundary_id: str, image_id: str, revision: int, *, allow_s
     width, height = guided_images.image_dimensions(path)
     if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
         raise ValueError('Boundary frame dimensions are unsupported')
+    if abs(width / height - 16 / 9) > 0.01:
+        raise ValueError('Boundary frames must be 16:9; crop the image first')
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         guided_workflow._revision(guided_workflow._row(db, pid), revision)
@@ -301,7 +304,7 @@ def crop(pid: str, boundary_id: str, image_id: str, revision: int) -> dict:
             db.execute('BEGIN IMMEDIATE')
             guided_workflow._revision(guided_workflow._row(db, pid), revision)
             version_id = insert_version(db, pid, boundary_id, target, stale=stale, prompt=prompt,
-                                        model=model, references=refs)
+                                        model=model, references=refs, version_id=new_id)
             guided_characters._changed(db, pid)
     except Exception:
         target.unlink(missing_ok=True)
