@@ -80,6 +80,15 @@ def test_excerpt_joins_english_sentences_with_a_space():
     assert boundaries._excerpt('Luma walks. The tree is big.', 'start') == 'Luma walks. The tree is big.'
 
 
+def test_excerpt_joins_chinese_sentences_without_extra_spaces():
+    assert boundaries._excerpt('陶渊明端起陶杯。他望向远方。', 'start') == '陶渊明端起陶杯。他望向远方。'
+
+
+def test_excerpt_does_not_drop_words_that_only_look_like_camera_noise():
+    assert 'Pandora opens the box.' in boundaries._excerpt('Pandora opens the box. Luma walks.', 'start')
+    assert 'Faded memories return.' in boundaries._excerpt('Faded memories return. Luma walks.', 'start')
+
+
 def test_excerpt_does_not_split_decimals():
     assert '3.5 meters.' in boundaries._excerpt('The tree is 3.5 meters. The river is wide.', 'start')
 

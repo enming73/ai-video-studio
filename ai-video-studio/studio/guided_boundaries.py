@@ -119,9 +119,9 @@ _SINGLE_FRAME = (
 
 
 _NOISE = re.compile(
-    r'^(全片|本镜头|这一镜|镜头|画面|最后[一二三四五六七八九十\d]*秒|特写'
-    r'|cut to|camera|close[- ]?up|wide shot|medium shot|long shot|pan|zoom|dissolve|'
-    r'fade|tracking|dolly|establishing|the (camera|frame|scene))',
+    r'^(?:全片|本镜头|这一镜|镜头|画面|最后[一二三四五六七八九十\d]*秒|特写'
+    r'|(?:cut to|camera|close[- ]?up|wide shot|medium shot|long shot|pan|zoom|dissolve|'
+    r'fade|tracking|dolly|establishing|the (?:camera|frame|scene))\b)',
     re.IGNORECASE)
 
 
@@ -135,7 +135,9 @@ def _excerpt(text: str, side: str, limit: int = 160, max_sentences: int = 2) -> 
         # Last resort: keep the raw text rather than returning an empty prompt.
         parts = [text]
     chosen = parts[:max_sentences] if side == 'start' else parts[-max_sentences:]
-    excerpt = ' '.join(chosen).strip()
+    joined = ''.join(chosen)
+    separator = ' ' if re.search(r'[A-Za-z]', joined) else ''
+    excerpt = separator.join(chosen).strip()
     return excerpt[:limit].strip() if side == 'start' else excerpt[-limit:].strip()
 
 
