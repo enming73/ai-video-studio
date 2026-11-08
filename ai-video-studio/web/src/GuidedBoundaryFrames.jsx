@@ -67,6 +67,8 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
             if (!window.confirm('确认已核查此请求，允许以后重新生成？')) return;
             await call(root + `/prompt-attempts/${a.id}/resolve`, 'POST', {confirm_checked: true});
             await refresh(true);
+            const rows = await call(root + '/prompt-attempts');
+            setPromptAttempts(rows.filter(x => x.boundary_id === boundary.id));
           })}>已核查，解除阻止</button></div>)}
     </section>
     <div className="guided-image-grid guided-boundary-grid">{frames.map(f => <figure key={f.id} className={f.confirmed ? 'selected' : ''}>

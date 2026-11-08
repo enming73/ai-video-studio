@@ -242,6 +242,10 @@ def preview_prompt(pid: str, boundary_id: str, model: str) -> dict:
         row = guided_workflow._row(db, pid)
         if not row['storyboard_confirmed']:
             raise ValueError('Confirm storyboard first')
+        settings = db.execute('SELECT storyboard_reconfirmed FROM guided_character_settings '
+                              'WHERE project_id=?', (pid,)).fetchone()
+        if not settings or not settings['storyboard_reconfirmed']:
+            raise ValueError('Confirm the storyboard for the character workflow')
         _, payload, digest = _source_payload(db, pid, boundary_id)
     return {'boundary_id': boundary_id, 'model': model.strip(), 'source_sha256': digest,
             'payload': payload, 'estimated_cost_usd': None,
@@ -266,6 +270,12 @@ def generate_prompt(pid: str, boundary_id: str, model: str, budget_usd: float, *
     core.require_paid_budget(budget_usd)
     if confirm_paid is not True or not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Explicit confirmation and request ID required')
+    load_dotenv()
+    base_url = os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1')
+    if not os.getenv('STUDIO_LLM_API_KEY'):
+        raise ValueError('Set STUDIO_LLM_API_KEY (no paid request made)')
+    if not base_url.startswith('https://') and not os.getenv('STUDIO_ALLOW_HTTP_LLM'):
+        raise ValueError('LLM endpoint must use HTTPS (or set STUDIO_ALLOW_HTTP_LLM=1 for local use)')
     aid = uuid4().hex
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -286,15 +296,17 @@ def generate_prompt(pid: str, boundary_id: str, model: str, budget_usd: float, *
                     details['source_sha256'], None, None, core.now()))
     try:
         result = core._llm_json(_LLM_SYSTEM, json.dumps(details['payload'], ensure_ascii=False),
-                                details['model'],
-                                os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1'))
+                                details['model'], base_url)
         text = result.get('prompt') if isinstance(result, dict) else None
         if not isinstance(text, str) or not 20 <= len(text.strip()) <= 4000:
             raise ValueError('Invalid prompt from the LLM')
         text = text.strip()
         with core.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            guided_workflow._revision(guided_workflow._row(db, pid), revision)
+            guided_workflow._row(db, pid)
+            if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
+                              (boundary_id, pid)).fetchone():
+                raise ValueError('Boundary changed during prompt generation')
             db.execute('INSERT INTO guided_boundary_prompts VALUES (?,?,?,?,?,?,?)',
                        (uuid4().hex, pid, boundary_id, text, details['source_sha256'],
                         details['model'], core.now()))
@@ -313,7 +325,7 @@ def clear_prompt(pid: str, boundary_id: str, revision: int) -> dict:
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         guided_workflow._revision(guided_workflow._row(db, pid), revision)
-        if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=?',
+        if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
                           (boundary_id, pid)).fetchone():
             raise ValueError('Unknown boundary')
         db.execute('DELETE FROM guided_boundary_prompts WHERE project_id=? AND boundary_id=?',

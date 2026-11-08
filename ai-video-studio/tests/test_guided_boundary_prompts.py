@@ -4,6 +4,12 @@ from fastapi.testclient import TestClient
 from studio import core, guided_boundaries as boundaries, guided_workflow as workflow, webapp
 
 
+@pytest.fixture(autouse=True)
+def llm_env(monkeypatch):
+    monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
+    monkeypatch.setenv('STUDIO_LLM_BASE_URL', 'https://example.com/v1')
+
+
 @pytest.fixture
 def llm(monkeypatch):
     seen = []
@@ -91,6 +97,27 @@ def test_clear_prompt_restores_auto(boundary_project, llm):
     assert info['effective_source'] == 'auto'
 
 
+def test_prompt_generation_fails_fast_without_llm_key(boundary_project, monkeypatch):
+    pid, state = boundary_project
+    boundary_id = state['boundaries'][1]['id']
+    monkeypatch.setattr(boundaries, 'load_dotenv', lambda: None)
+    monkeypatch.delenv('STUDIO_LLM_API_KEY', raising=False)
+    monkeypatch.setattr(core, '_llm_json', lambda *args: pytest.fail('no request without a key'))
+    with pytest.raises(ValueError, match='STUDIO_LLM_API_KEY'):
+        boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
+                                   confirm_paid=True, request_id='no-key',
+                                   revision=state['revision'])
+    assert boundaries.list_prompt_attempts(pid) == []
+
+
+def test_prompt_roles_for_opening_and_closing(boundary_project):
+    pid, state = boundary_project
+    opening = boundaries.preview_prompt(pid, state['boundaries'][0]['id'], 'gpt-4o-mini')
+    closing = boundaries.preview_prompt(pid, state['boundaries'][2]['id'], 'gpt-4o-mini')
+    assert opening['payload']['role'] == 'opening'
+    assert closing['payload']['role'] == 'closing'
+
+
 def test_prompt_is_scoped_to_the_project(boundary_project):
     pid, state = boundary_project
     with pytest.raises(ValueError, match='Unknown boundary'):
@@ -115,3 +142,23 @@ def test_prompt_routes(boundary_project, llm):
     assert response.json()['status'] == 'COMPLETED'
     info = api.get(base + f'/boundaries/{boundary_id}/prompt').json()
     assert info['effective_source'] == 'llm'
+    cleared = api.request('DELETE', base + f'/boundaries/{boundary_id}/prompt',
+                          json={'revision': workflow.get(pid)['revision']})
+    assert cleared.status_code == 200
+    assert api.get(base + f'/boundaries/{boundary_id}/prompt').json()['effective_source'] == 'auto'
+
+
+def test_prompt_resolve_route(boundary_project, monkeypatch):
+    pid, state = boundary_project
+    boundary_id = state['boundaries'][1]['id']
+    monkeypatch.setattr(core, '_llm_json', lambda *args: (_ for _ in ()).throw(RuntimeError('network')))
+    api = TestClient(webapp.app)
+    base = f'/api/projects/{pid}/guided'
+    response = api.post(base + f'/boundaries/{boundary_id}/prompt',
+                        json={'model': 'gpt-4o-mini', 'budget_usd': 0.1, 'confirm_paid': True,
+                              'request_id': 'route-unknown', 'revision': state['revision']})
+    assert response.json()['status'] == 'UNKNOWN'
+    resolved = api.post(base + f'/prompt-attempts/{response.json()["id"]}/resolve',
+                        json={'confirm_checked': True})
+    assert resolved.status_code == 200
+    assert resolved.json()['status'] == 'ACKNOWLEDGED'
