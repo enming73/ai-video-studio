@@ -120,8 +120,8 @@ class ResolveImage(BaseModel):
 class StructureShot(BaseModel):
     id: str | None = None
     prompt: str = Field(min_length=1, max_length=10000)
-    duration: int = Field(ge=1, le=600)
-    character_ids: list[str] = []
+    duration: int = Field(ge=1, le=600, strict=True)
+    character_ids: list[str]
 
 
 class Structure(Revision):

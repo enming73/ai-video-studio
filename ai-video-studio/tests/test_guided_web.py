@@ -200,3 +200,20 @@ def test_structure_route_rejects_non_integer_duration(api):
         {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 'ten',
          'character_ids': []}]}
     assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_rejects_numeric_string_duration(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': '10',
+         'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_requires_character_ids(api):
+    pid, state, base = make_boundary_project(api)
+    before = workflow.get(pid)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 10}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+    assert workflow.get(pid) == before
