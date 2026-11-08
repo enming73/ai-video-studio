@@ -1,13 +1,19 @@
+import hashlib
 import subprocess
 from pathlib import Path
 
 from studio import core, guided_boundaries as boundaries, timeline
 
 
-def make_png(path, size='1536x1024'):
-    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', f'color=c=red:s={size}',
+def make_png(path, size='1536x1024', color='red'):
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', f'color=c={color}:s={size}',
                     '-frames:v', '1', str(path)], check=True)
     return path.read_bytes()
+
+
+def _color_for(name):
+    digest = hashlib.md5(name.encode()).digest()
+    return ('red', 'green', 'blue')[digest[0] % 3]
 
 
 def attach_video(pid, shot, first_id, last_id):
@@ -30,7 +36,7 @@ def add_version(pid, boundary_id, name, size='1536x1024', stale=False, reference
     directory = Path(core.HOME) / pid / 'guided-images'
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f'{name}.png'
-    make_png(path, size)
+    make_png(path, size, color=_color_for(name))
     with core.connect() as db:
         return boundaries.insert_version(db, pid, boundary_id, path, stale=stale,
                                          prompt='p', model='test', references=references or [])

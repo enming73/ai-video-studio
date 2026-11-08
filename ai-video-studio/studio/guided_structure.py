@@ -59,14 +59,14 @@ def _copy_candidates(db, pid, new_boundary_id, left, right, old_entries):
         source = next((b for b, _l, r in old_entries if r == right), None)
         if source is not None:
             sources.append(source)
-    seen_files = set()
+    seen_sha = set()
     for source in sources:
         versions = db.execute('SELECT * FROM guided_boundary_versions WHERE project_id=? AND boundary_id=?',
                               (pid, source['id'])).fetchall()
         for version in versions:
-            if version['file'] in seen_files:
+            if version['sha256'] in seen_sha:
                 continue
-            seen_files.add(version['file'])
+            seen_sha.add(version['sha256'])
             new_version_id = uuid4().hex
             db.execute('INSERT INTO guided_boundary_versions(id,project_id,boundary_id,file,sha256,stale,created) '
                        'VALUES (?,?,?,?,?,?,?)',

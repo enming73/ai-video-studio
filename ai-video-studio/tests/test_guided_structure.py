@@ -2,7 +2,7 @@ import pytest
 
 from studio import core, guided_boundaries as boundaries, guided_characters as roles
 from studio import guided_structure, guided_workflow as workflow, timeline
-from tests.helpers import add_version, attach_video
+from tests.helpers import add_version, attach_video, make_png
 
 
 @pytest.fixture
@@ -72,6 +72,25 @@ def test_deleting_middle_shot_merges_boundaries_without_confirming(structure_pro
     assert state['boundaries'][0]['id'] == b[0]['id']
     assert state['boundaries'][2]['id'] == b[3]['id']
     assert [s['old_video_decision_required'] for s in state['shots']] == [True, True]
+
+
+def test_merge_deduplicates_shared_candidate_by_sha256(structure_project):
+    pid, state = structure_project
+    b = state['boundaries']
+    with core.connect() as db:
+        directory = core.HOME / pid / 'guided-images'
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / 'shared.png'
+        make_png(path, '1536x864')
+        # The same file (hence the same sha256) is a candidate on both the end
+        # boundary of shot 1 and the start boundary of shot 3. Merging them must
+        # dedupe to a single candidate rather than copying the bytes twice.
+        boundaries.insert_version(db, pid, b[1]['id'], path, stale=False, prompt='p', model='test', references=[])
+        boundaries.insert_version(db, pid, b[2]['id'], path, stale=False, prompt='p', model='test', references=[])
+    current = workflow.get(pid)
+    shots = target(current, [6, 6, 14])
+    state = guided_structure.apply(pid, [shots[0], shots[2]], current['revision'])
+    assert state['boundaries'][1]['candidate_count'] == 1
 
 
 def test_inserting_shot_creates_two_unconfirmed_boundaries(structure_project):
