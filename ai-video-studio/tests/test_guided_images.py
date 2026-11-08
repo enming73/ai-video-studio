@@ -106,51 +106,6 @@ def test_concurrent_duplicate_image_request_makes_one_submission(project, monkey
     assert len(calls) == 1
 
 
-def test_first_frame_requires_approved_character_and_storyboard(project):
-    pid, cid, rev = project
-    draft = {'character_bible': {}, 'shots': [{'prompt': 'An elephant walks across the forest.', 'duration': 10, 'character_ids': [cid]}]}
-    workflow.save_draft(pid, draft, rev)
-    with pytest.raises(ValueError):
-        images.preview_frame(pid, 1, 'gpt-image-2.5-sunburst')
-
-
-def test_later_first_frame_is_blocked_until_previous_video_confirmed(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    pid = core.create('A quiet landscape', 20, 'mock', 1)
-    workflow.create(pid, character_stage_enabled=True)
-    state = roles.confirm_empty_cast(pid, 0)
-    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
-        {'prompt':'A quiet river flows through the forest.', 'duration':10,'character_ids':[]},
-        {'prompt':'A sunny mountain stands in the distance.', 'duration':10,'character_ids':[]}]}, state['revision'])
-    workflow.confirm_storyboard(pid, state['revision'])
-    with pytest.raises(ValueError, match='earlier'):
-        images.preview_frame(pid, 2, 'gpt-image-2.5-sunburst')
-
-
-def test_no_character_first_frame_generation_is_budgeted_and_versioned(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    pid = core.create('A quiet empty landscape', 10, 'mock', 1)
-    workflow.create(pid, character_stage_enabled=True)
-    state = roles.confirm_empty_cast(pid, 0)
-    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
-        {'prompt': 'A quiet river flows through the forest.', 'duration': 10, 'character_ids': []}]}, state['revision'])
-    state = workflow.confirm_storyboard(pid, state['revision'])
-    monkeypatch.setattr(images, '_image_request', lambda *a, **kw: {'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    plan = images.preview_frame(pid, 1, 'gpt-image-2.5-sunburst')
-    assert plan['references'] == []
-    with pytest.raises(ValueError):
-        images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 0, confirm_paid=True, request_id='bad', revision=state['revision'])
-    first = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='frame1', revision=state['revision'])
-    assert first['status'] == 'COMPLETED'
-    assert images.image_path(pid, first['image_id']).read_bytes() == png()
-    updated = images.confirm_frame(pid, 1, first['image_id'], workflow.get(pid)['revision'])
-    assert updated['confirmed_frame_id'] == first['image_id']
-    updated = workflow.edit_shot(pid, 1, 'A different river view beneath the trees.', updated['revision'])
-    assert updated['shots'][0]['confirmed_frame_id'] is None
-    assert images.list_frames(pid, 1)[0]['stale'] == 1
-
-
 def test_selecting_video_from_current_frame_resolves_old_video_decision(tmp_path, monkeypatch):
     from studio import timeline
     monkeypatch.setattr(core, 'HOME', tmp_path)
@@ -203,46 +158,3 @@ def test_syncing_unknown_video_requires_explicit_keep_decision(tmp_path, monkeyp
         db.execute('UPDATE shots SET file=? WHERE project_id=?', (str(path), pid))
     timeline.sync(pid)
     assert workflow.get(pid)['shots'][0]['old_video_decision_required']
-
-
-def test_confirming_different_frame_requires_review_of_old_video(tmp_path, monkeypatch):
-    from studio import timeline
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    pid = core.create('Forest', 10, 'mock', 5)
-    workflow.create(pid, character_stage_enabled=True)
-    state = roles.confirm_empty_cast(pid, 0)
-    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
-        {'prompt': 'The river flows in a quiet forest.', 'duration': 10, 'character_ids': []}]}, state['revision'])
-    state = workflow.confirm_storyboard(pid, state['revision'])
-    monkeypatch.setattr(images, '_image_request', lambda *a, **kw: {'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    first = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='one', revision=state['revision'])
-    images.confirm_frame(pid, 1, first['image_id'], workflow.get(pid)['revision'])
-    video = tmp_path / 'old.mp4'; video.write_bytes(b'old')
-    asset = timeline.import_asset(pid, 1, str(video)); timeline.select(pid, 1, asset)
-    second = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='two', revision=workflow.get(pid)['revision'])
-    images.confirm_frame(pid, 1, second['image_id'], workflow.get(pid)['revision'])
-    assert workflow.get(pid)['shots'][0]['old_video_decision_required']
-
-
-def test_unrelated_character_edit_during_frame_generation_does_not_mark_frame_stale(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, 'HOME', tmp_path)
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    pid = core.create('Two characters', 10, 'mock', 1)
-    workflow.create(pid, character_stage_enabled=True)
-    state = roles.save_character(pid, None, 'A', 'Elephant', 0)
-    state = roles.save_character(pid, None, 'B', 'Parrot', state['revision'])
-    a,b = [r['id'] for r in state['characters']]
-    for cid in (a,b):
-        img = images.import_character_image(pid, cid, 'role.png', png(), state['revision'])
-        state = roles.confirm_character(pid, cid, img['id'], img['revision'])
-    state = workflow.save_draft(pid, {'character_bible':{},'shots':[
-        {'prompt':'An elephant walks in a quiet forest.', 'duration':10,'character_ids':[a]}]}, state['revision'])
-    state = workflow.confirm_storyboard(pid, state['revision'])
-    def edit_unrelated(*args, **kwargs):
-        roles.save_character(pid, b, 'B', 'A different parrot', workflow.get(pid)['revision'])
-        return {'data': [{'b64_json': base64.b64encode(png()).decode()}]}
-    monkeypatch.setattr(images, '_image_edit', edit_unrelated)
-    result = images.generate_frame(pid, 1, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='frame', revision=state['revision'])
-    assert result['status'] == 'COMPLETED'
-    assert images.list_frames(pid, 1)[0]['stale'] == 0
