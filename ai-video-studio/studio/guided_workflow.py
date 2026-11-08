@@ -154,10 +154,6 @@ def confirm_shot(pid: str, seq: int, asset_id: str, revision: int) -> dict:
         shot = db.execute('SELECT * FROM shots WHERE project_id=? AND seq=?', (pid, seq)).fetchone()
         if not shot:
             raise ValueError('Unknown shot')
-        missing = db.execute('''SELECT COUNT(*) FROM shots s LEFT JOIN guided_confirmations c
-            ON c.project_id=s.project_id AND c.shot_id=s.id WHERE s.project_id=? AND s.seq<? AND c.shot_id IS NULL''', (pid, seq)).fetchone()[0]
-        if missing:
-            raise ValueError('Confirm earlier shots first')
         asset = db.execute('''SELECT a.file,a.sha256 FROM timeline_items t JOIN shot_assets a ON a.id=t.asset_id
             WHERE t.project_id=? AND t.shot_id=? AND t.asset_id=?''', (pid,shot['id'],asset_id)).fetchone()
         if not asset or not Path(asset['file']).is_file() or timeline._hash(Path(asset['file'])) != asset['sha256']:

@@ -9,7 +9,7 @@ from uuid import uuid4
 import httpx
 from dotenv import load_dotenv
 
-from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities, guided_characters, guided_images
+from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities, guided_characters, guided_images, guided_boundaries
 
 _RATES = {'minimax': 'MINIMAX_USD_PER_SECOND', 'wan': 'WAN_USD_PER_SECOND', 'flux': 'FAL_USD_PER_SECOND'}
 _ACTIVE = ('SUBMITTING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
@@ -22,11 +22,6 @@ def _shot(db, pid, seq):
     shot = db.execute('SELECT * FROM shots WHERE project_id=? AND seq=?', (pid, seq)).fetchone()
     if not shot:
         raise ValueError('Unknown shot')
-    missing = db.execute('''SELECT COUNT(*) FROM shots s LEFT JOIN guided_confirmations c
-        ON c.project_id=s.project_id AND c.shot_id=s.id WHERE s.project_id=? AND s.seq<?
-        AND c.shot_id IS NULL''', (pid, seq)).fetchone()[0]
-    if missing:
-        raise ValueError('Earlier shots must be confirmed')
     return dict(shot)
 
 
@@ -49,21 +44,24 @@ def preview(pid: str, seq: int) -> dict:
         shot = _shot(db, pid, seq)
         enabled = db.execute('SELECT * FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone()
         choice = db.execute('SELECT * FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
-        frame = None
+        first_frame = last_frame = None
         if enabled:
             guided_characters.require_confirmed(db, pid)
             if not enabled['storyboard_reconfirmed']: raise ValueError('Confirm storyboard first')
-            frame = db.execute('''SELECT f.id,f.sha256 FROM guided_frame_selection s JOIN guided_frame_versions f
-                ON f.id=s.confirmed_frame_id AND f.project_id=s.project_id AND f.shot_id=s.shot_id
-                WHERE s.project_id=? AND s.shot_id=?''', (pid, shot['id'])).fetchone()
-            if not frame: raise ValueError('Confirm a first frame before video generation')
+            start, end = guided_boundaries.for_shot(db, pid, shot['id'])
+            if not guided_boundaries.ready(db, pid, start['id']) or not guided_boundaries.ready(db, pid, end['id']):
+                raise ValueError('Confirm both boundary frames before video generation')
             if not choice: raise ValueError('Select a supported image-to-video model')
+            first_frame = db.execute('SELECT id, sha256 FROM guided_boundary_versions WHERE id=?',
+                                     (start['confirmed_image_id'],)).fetchone()
+            last_frame = db.execute('SELECT id, sha256 FROM guided_boundary_versions WHERE id=?',
+                                    (end['confirmed_image_id'],)).fetchone()
         provider = choice['provider'] if enabled else p['provider']
         model = choice['model'] if enabled else guided_storyboard._MODELS[provider]
-    if frame:
-        image_path = guided_images.image_path(pid, frame['id'])
+    if first_frame:
+        first_path = guided_images.image_path(pid, first_frame['id'])
         if provider == 'minimax':
-            width,height = guided_images.image_dimensions(image_path)
+            width,height = guided_images.image_dimensions(first_path)
             if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
                 raise ValueError('First-frame image dimensions are unsupported by MiniMax')
     cap = provider_capabilities.i2v_capabilities(provider, model) if enabled else provider_capabilities.capabilities(provider, model)
@@ -71,8 +69,11 @@ def preview(pid: str, seq: int) -> dict:
         raise ValueError('Provider duration capability unverified or unsupported')
     rate = _rate(provider)
     return {'project_id': pid, 'seq': seq, 'duration': shot['duration'], 'prompt': shot['prompt'],
-            'provider': provider, 'model': model, 'frame_id': frame['id'] if frame else None,
-            'frame_sha256': frame['sha256'] if frame else None,
+            'provider': provider, 'model': model,
+            'first_frame_id': first_frame['id'] if first_frame else None,
+            'first_frame_sha256': first_frame['sha256'] if first_frame else None,
+            'last_frame_id': last_frame['id'] if last_frame else None,
+            'last_frame_sha256': last_frame['sha256'] if last_frame else None,
             'paid': provider != 'mock', 'estimated_cost_usd': round(rate * shot['duration'], 6),
             'note': 'Estimated reservation is not a provider-enforced spending cap.'}
 
@@ -101,34 +102,60 @@ def attempt(pid: str, attempt_id: str) -> dict:
         return dict(row)
 
 
-def _mock_frame_video(shot, target, frame, mime_type):
-    suffix = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}.get(mime_type)
-    if not suffix:
+def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mime):
+    suffixes = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}
+    first_suffix = suffixes.get(first_mime)
+    last_suffix = suffixes.get(last_mime)
+    if not first_suffix:
         raise ValueError('Unsupported first-frame type')
-    source = target.with_name('first-frame' + suffix)
-    with source.open('xb') as f:
-        f.write(frame)
+    if not last_suffix:
+        raise ValueError('Unsupported last-frame type')
+    first_source = target.with_name('first-frame' + first_suffix)
+    last_source = target.with_name('last-frame' + last_suffix)
+    with first_source.open('xb') as f:
+        f.write(first_frame)
+    with last_source.open('xb') as f:
+        f.write(last_frame)
     duration = shot['duration']
-    core.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-loop','1','-i',str(source),
-              '-vf',f'fps=24,scale=1280:720:force_original_aspect_ratio=decrease,'
-                    f'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,trim=duration={duration},setpts=N/(24*TB)',
-              '-frames:v',str(duration*24),'-an','-c:v','libx264','-preset','veryfast',
-              '-pix_fmt','yuv420p',str(target)])
-    core.verify_video(target,duration)
+    first_half = duration // 2
+    last_half = duration - first_half
+    parts = []
+    concat = target.with_name('concat.txt')
+    try:
+        for name, source, half in (('first', first_source, first_half), ('last', last_source, last_half)):
+            part = target.with_name(f'{name}-half.mp4')
+            core.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-loop','1','-i',str(source),
+                      '-vf',f'fps=24,scale=1280:720:force_original_aspect_ratio=decrease,'
+                            f'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,trim=duration={half},setpts=N/(24*TB)',
+                      '-frames:v',str(half*24),'-an','-c:v','libx264','-preset','veryfast',
+                      '-pix_fmt','yuv420p',str(part)])
+            parts.append(part)
+        concat.write_text(''.join(f"file '{p.resolve()}'\n" for p in parts), encoding='utf-8')
+        core.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-f','concat','-safe','0',
+                  '-i',str(concat),'-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p',str(target)])
+        core.verify_video(target,duration)
+    finally:
+        for path in (first_source, last_source, concat, *parts):
+            path.unlink(missing_ok=True)
 
 
 def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request_id: str) -> dict:
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Request id required')
     estimate = preview(pid, seq)
-    first_frame = None
-    mime_type = None
-    if estimate['frame_id']:
-        path = guided_images.image_path(pid, estimate['frame_id'])
-        first_frame = path.read_bytes()
-        if hashlib.sha256(first_frame).hexdigest() != estimate['frame_sha256']:
-            raise ValueError('Confirmed first frame changed')
-        mime_type = mimetypes.guess_type(path.name)[0]
+    first_frame = last_frame = None
+    first_mime = last_mime = None
+    if estimate['first_frame_id']:
+        first_path = guided_images.image_path(pid, estimate['first_frame_id'])
+        first_frame = first_path.read_bytes()
+        if hashlib.sha256(first_frame).hexdigest() != estimate['first_frame_sha256']:
+            raise ValueError('Confirmed boundary frame changed')
+        first_mime = mimetypes.guess_type(first_path.name)[0]
+        last_path = guided_images.image_path(pid, estimate['last_frame_id'])
+        last_frame = last_path.read_bytes()
+        if hashlib.sha256(last_frame).hexdigest() != estimate['last_frame_sha256']:
+            raise ValueError('Confirmed boundary frame changed')
+        last_mime = mimetypes.guess_type(last_path.name)[0]
     if estimate['paid'] and (confirm_paid is not True or isinstance(budget_usd, bool)
             or not isinstance(budget_usd, (int, float)) or not math.isfinite(budget_usd)
             or budget_usd <= 0 or budget_usd < estimate['estimated_cost_usd']):
@@ -148,27 +175,31 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
             raise ValueError('An earlier attempt is unresolved; recover it before submitting again')
         if shot['prompt'] != estimate['prompt'] or shot['duration'] != estimate['duration']:
             raise ValueError('Shot changed after preview')
-        if estimate['frame_id']:
-            current = db.execute('SELECT confirmed_frame_id FROM guided_frame_selection WHERE project_id=? AND shot_id=?', (pid, shot['id'])).fetchone()
+        if estimate['first_frame_id']:
+            start, end = guided_boundaries.for_shot(db, pid, shot['id'])
             choice = db.execute('SELECT provider,model FROM guided_video_choices WHERE project_id=?', (pid,)).fetchone()
-            if not current or current['confirmed_frame_id'] != estimate['frame_id'] or not choice or choice['provider'] != estimate['provider'] or choice['model'] != estimate['model']:
-                raise ValueError('First frame or video model changed after preview')
+            if (not start['confirmed_image_id'] or not end['confirmed_image_id']
+                    or start['confirmed_image_id'] != estimate['first_frame_id']
+                    or end['confirmed_image_id'] != estimate['last_frame_id']
+                    or not choice or choice['provider'] != estimate['provider'] or choice['model'] != estimate['model']):
+                raise ValueError('Boundary frames or video model changed after preview')
         reserved = db.execute('SELECT COALESCE(SUM(reserved_usd),0) FROM guided_attempts WHERE project_id=?', (pid,)).fetchone()[0]
         if estimate['paid'] and reserved + estimate['estimated_cost_usd'] > p['budget'] + 1e-9:
             raise ValueError('Project budget insufficient')
         db.execute('''INSERT INTO guided_attempts(id,project_id,shot_id,request_id,prompt,duration,provider,reserved_usd,status)
                       VALUES (?,?,?,?,?,?,?,?,?)''', (aid, pid, shot['id'], request_id, shot['prompt'], shot['duration'],
                                                     estimate['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
-        if estimate['frame_id']:
-            db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,model) VALUES (?,?,?,?)',
-                       (aid, estimate['frame_id'], estimate['frame_sha256'], estimate['model']))
+        if estimate['first_frame_id']:
+            db.execute('INSERT INTO guided_video_provenance(attempt_id,frame_id,frame_sha256,last_frame_id,last_frame_sha256,model) VALUES (?,?,?,?,?,?)',
+                       (aid, estimate['first_frame_id'], estimate['first_frame_sha256'],
+                        estimate['last_frame_id'], estimate['last_frame_sha256'], estimate['model']))
     if estimate['provider'] == 'mock':
         try:
             directory = core.HOME / pid / 'guided-attempts' / aid
             directory.mkdir(parents=True, exist_ok=False)
             target = directory / 'video.mp4'
             if first_frame is not None:
-                _mock_frame_video(shot, target, first_frame, mime_type)
+                _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mime)
             else:
                 core.mock_generate(shot, target)
             core.verify_video(target, shot['duration'])
@@ -179,7 +210,7 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
     try:
         with httpx.Client(timeout=httpx.Timeout(40, connect=15), follow_redirects=False) as client:
             provider = core.PROVIDERS[estimate['provider']](client)
-            remote = (provider.submit_i2v(shot['prompt'], shot['duration'], first_frame, mime_type)
+            remote = (provider.submit_i2v(shot['prompt'], shot['duration'], first_frame, first_mime, last_frame, last_mime)
                       if first_frame is not None else provider.submit(shot['prompt'], shot['duration']))
         _update(pid, aid, status='SUBMITTED', remote_id=remote)
     except Exception as exc:
