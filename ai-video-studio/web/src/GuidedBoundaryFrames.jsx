@@ -10,9 +10,11 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
   const [promptModel, setPromptModel] = useState('gpt-4o-mini');
   const [promptBudget, setPromptBudget] = useState('0.1');
   const [promptAttempts, setPromptAttempts] = useState([]);
+  const [promptError, setPromptError] = useState('');
   useEffect(() => {
     setPreview(null);
     setDims({});
+    setPromptError('');
     if (!boundary) return;
     call(root + `/boundaries/${boundary.id}/frames`).then(setFrames).catch(() => setFrames([]));
     call(root + `/boundaries/${boundary.id}/prompt`).then(setPromptInfo).catch(() => setPromptInfo(null));
@@ -42,19 +44,32 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
         <p>当前来源：{promptInfo.effective_source === 'llm'
           ? `AI（${promptInfo.llm_prompt_model}${promptInfo.llm_prompt_current ? '' : ' · 已过期'}）`
           : '自动规则'}</p>
+        {!promptInfo.llm_prompt && <p className="guided-warning">尚未生成 AI 提示词，当前使用自动规则。要 AI 版请点下方按钮；生成边界帧本身不会自动调用 LLM。</p>}
+        {promptInfo.llm_prompt && <>
+          <p>AI 提示词{promptInfo.llm_prompt_current ? '' : '（已过期，当前回退自动规则）'}：</p>
+          <pre className="guided-prompt">{promptInfo.llm_prompt}</pre>
+        </>}
+        <p>实际发送：</p>
         <pre className="guided-prompt">{promptInfo.effective_prompt}</pre>
       </>}
+      {promptError && <p className="guided-warning">{promptError}</p>}
       <div className="fields">
         <label>提示词模型<input value={promptModel} onChange={e => setPromptModel(e.target.value)} /></label>
         <label>本次预算 USD<input type="number" min="0" step="0.01" value={promptBudget} onChange={e => setPromptBudget(e.target.value)} /></label>
         <button disabled={busy || !promptModel.trim() || Number(promptBudget) <= 0} onClick={() => run(async () => {
-          if (!window.confirm(`确认将相邻镜头描述发送给 ${promptModel} 生成边界提示词？\n本次预算 $${promptBudget}，不是供应商硬上限。`)) return;
-          const r = await call(root + `/boundaries/${boundary.id}/prompt`, 'POST', {
-            model: promptModel, budget_usd: Number(promptBudget), confirm_paid: true,
-            request_id: crypto.randomUUID(), revision: state.revision});
-          await refresh(true);
-          if (r.status !== 'COMPLETED') throw Error('提示词请求结果不明，请先核查供应商账单。');
-        })}>AI 写这个边界的提示词</button>
+          setPromptError('');
+          try {
+            if (!window.confirm(`确认将相邻镜头描述发送给 ${promptModel} 生成边界提示词？\n本次预算 $${promptBudget}，不是供应商硬上限。`)) return;
+            const r = await call(root + `/boundaries/${boundary.id}/prompt`, 'POST', {
+              model: promptModel, budget_usd: Number(promptBudget), confirm_paid: true,
+              request_id: crypto.randomUUID(), revision: state.revision});
+            await refresh(true);
+            if (r.status !== 'COMPLETED') throw Error('提示词请求结果不明，请先核查供应商账单。');
+          } catch (e) {
+            setPromptError(e.message);
+            throw e;
+          }
+        })}>AI 写这个边界的提示词（付费）</button>
       </div>
       {promptInfo?.llm_prompt && <div className="fields"><button onClick={() => run(async () => {
         if (!window.confirm('恢复自动提示词？AI 提示词记录会删除，已生成的图片不受影响。')) return;
