@@ -124,6 +124,9 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
             raise ValueError('Shot duration must be an integer')
         if not isinstance(shot.get('character_ids'), list):
             raise ValueError('Shot character_ids required')
+        shot_id = shot.get('id')
+        if shot_id is not None and (not isinstance(shot_id, str) or not shot_id):
+            raise ValueError('Invalid shot id')
 
     with core.connect() as db:
         timeline.migrate(db)
@@ -149,13 +152,13 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         new_ids = []
         seen = set()
         for shot in shots:
-            sid = shot['id'] if shot['id'] is not None else uuid4().hex
+            sid = shot.get('id') if shot.get('id') is not None else uuid4().hex
             if sid in seen:
                 raise ValueError('Duplicate shot id')
             seen.add(sid)
             new_ids.append(sid)
         for shot, sid in zip(shots, new_ids):
-            if shot['id'] is not None and sid not in old_by_id:
+            if shot.get('id') is not None and sid not in old_by_id:
                 raise ValueError('Unknown shot id')
             if enabled:
                 guided_characters._validate_ids(db, pid, shot['character_ids'])
@@ -163,7 +166,7 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         # Duration changes on a shot with generated media are only allowed when
         # the shot's neighbours change too (its video is invalidated anyway).
         for index, (shot, sid) in enumerate(zip(shots, new_ids)):
-            if shot['id'] is None:
+            if shot.get('id') is None:
                 continue
             old = old_by_id[sid]
             if shot['duration'] == old['duration'] or not _shot_has_media(db, pid, sid):
@@ -176,7 +179,7 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         # Invalidate adjacent boundaries before the rebuild (Task 3 cascades use
         # the pre-reindex sequence) and refresh cast links that changed.
         for shot, sid in zip(shots, new_ids):
-            if shot['id'] is None:
+            if shot.get('id') is None:
                 continue
             old = old_by_id[sid]
             prompt_changed = shot['prompt'].strip() != old['prompt']
@@ -207,7 +210,7 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         # Reindex active shots 1..N, then insert new rows at fresh ids.
         db.execute('UPDATE shots SET seq = seq + 1000000 WHERE project_id=? AND archived=0', (pid,))
         for index, (shot, sid) in enumerate(zip(shots, new_ids)):
-            if shot['id'] is None:
+            if shot.get('id') is None:
                 db.execute('INSERT INTO shots(id,project_id,seq,prompt,duration,status) VALUES (?,?,?,?,?,?)',
                            (sid, pid, 2000000 + index, shot['prompt'].strip(), shot['duration'], 'PLANNED'))
                 if enabled:
@@ -218,7 +221,7 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
 
         # Update prompts and durations for existing shots.
         for shot, sid in zip(shots, new_ids):
-            if shot['id'] is None:
+            if shot.get('id') is None:
                 continue
             db.execute('UPDATE shots SET prompt=?, duration=? WHERE id=?',
                        (shot['prompt'].strip(), shot['duration'], sid))

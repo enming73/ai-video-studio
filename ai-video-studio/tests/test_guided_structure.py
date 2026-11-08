@@ -123,3 +123,15 @@ def test_structure_is_rejected_while_a_paid_request_is_unresolved(structure_proj
                    ('v1', pid, state['shots'][0]['id'], 'r2', state['shots'][0]['prompt'], 6, 'minimax', 1, 'RUNNING'))
     with pytest.raises(ValueError, match='unresolved'):
         guided_structure.apply(pid, target(state, [6, 6, 8]), state['revision'])
+
+
+def test_missing_id_creates_new_shot_and_malformed_id_is_rejected(structure_project):
+    pid, state = structure_project
+    with pytest.raises(ValueError, match='Invalid shot id'):
+        guided_structure.apply(pid, [{'id': [], 'prompt': 'Bad', 'duration': 20, 'character_ids': []}],
+                               state['revision'])
+    old_id = state['shots'][0]['id']
+    result = guided_structure.apply(pid, [{'prompt': 'An elephant returns.', 'duration': 20, 'character_ids': []}],
+                                    workflow.get(pid)['revision'])
+    assert len(result['shots']) == 1
+    assert result['shots'][0]['id'] != old_id

@@ -117,8 +117,15 @@ class ResolveImage(BaseModel):
     confirm_checked: bool = False
 
 
+class StructureShot(BaseModel):
+    id: str | None = None
+    prompt: str = Field(min_length=1, max_length=10000)
+    duration: int = Field(ge=1, le=600)
+    character_ids: list[str] = []
+
+
 class Structure(Revision):
-    shots: list[dict]
+    shots: list[StructureShot]
 
 
 class BoundaryConfirm(Revision):
@@ -230,7 +237,7 @@ def boundary_unconfirm(pid: str, boundary_id: str, body: Revision):
 
 @router.put('/structure')
 def structure(pid: str, body: Structure):
-    return call(guided_structure.apply, pid, body.shots, body.revision)
+    return call(guided_structure.apply, pid, [s.model_dump() for s in body.shots], body.revision)
 
 
 @router.get('/image-attempts')

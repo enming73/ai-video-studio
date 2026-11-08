@@ -174,3 +174,29 @@ def test_unconfirm_route(api):
                            json={'revision': workflow.get(pid)['revision']})
     assert response.status_code == 200
     assert workflow.get(pid)['boundaries'][0]['confirmed'] is False
+
+
+def test_structure_route_creates_shot_without_id(api):
+    pid, state, base = make_boundary_project(api)
+    old_id = state['shots'][0]['id']
+    body = {'revision': state['revision'], 'shots': [
+        {'prompt': 'An elephant returns.', 'duration': 10, 'character_ids': []}]}
+    response = api.put(base + '/structure', json=body)
+    assert response.status_code == 200, response.text
+    assert len(response.json()['shots']) == 1
+    assert response.json()['shots'][0]['id'] != old_id
+
+
+def test_structure_route_rejects_unhashable_id(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': [], 'prompt': 'An elephant walks.', 'duration': 10, 'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
+
+
+def test_structure_route_rejects_non_integer_duration(api):
+    pid, state, base = make_boundary_project(api)
+    body = {'revision': state['revision'], 'shots': [
+        {'id': state['shots'][0]['id'], 'prompt': 'An elephant walks.', 'duration': 'ten',
+         'character_ids': []}]}
+    assert api.put(base + '/structure', json=body).status_code == 422
