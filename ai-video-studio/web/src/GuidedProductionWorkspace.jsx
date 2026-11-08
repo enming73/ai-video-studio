@@ -126,7 +126,7 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
       </div> : <div className="fields">
         {state.shots.map(s => <button key={s.id} className={seq === s.seq ? 'active' : ''} onClick={() => setSeq(s.seq)}>
           镜头 {s.seq} {s.confirmed ? '✓' : '待确认'}</button>)}</div>}
-      {selectedBoundary && <GuidedBoundaryFrames pid={pid} boundary={selectedBoundary} state={state} call={call} run={run} refresh={refresh} onClose={() => setBoundaryId(null)} />}
+      {selectedBoundary && <GuidedBoundaryFrames pid={pid} boundary={selectedBoundary} state={state} call={call} run={run} refresh={refresh} busy={busy} onClose={() => setBoundaryId(null)} />}
       {shot && <article className="guided-card"><h4>镜头 {seq} · {shot.duration} 秒 {shot.confirmed?'· 已确认':'· 待确认'}</h4>
         {state.character_stage_enabled && <>
           <div className="guided-shot-boundaries">

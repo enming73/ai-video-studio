@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 
-export default function GuidedBoundaryFrames({pid, boundary, state, call, run, refresh, onClose}) {
+export default function GuidedBoundaryFrames({pid, boundary, state, call, run, refresh, busy, onClose}) {
   const root = `/projects/${encodeURIComponent(pid)}/guided`;
   const [frames, setFrames] = useState([]);
   const [budget, setBudget] = useState('1');
