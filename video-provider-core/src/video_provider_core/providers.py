@@ -84,6 +84,7 @@ class MiniMax(Provider):
 class Flux(Provider):
     name = 'flux'
     model = 'blackforestlabs/flux-3-max/text-to-video'
+    i2v_model = 'blackforestlabs/flux-3-max/image-to-video'
     def headers(self):
         key = os.getenv('FAL_KEY')
         if not key: raise ProviderError('Missing FAL_KEY')
@@ -95,8 +96,26 @@ class Flux(Provider):
         rid=data.get('request_id')
         if not rid: raise ProviderError(f'fal missing request_id: {data}')
         return str(rid)
-    def poll(self,remote_id):
-        base='https://queue.fal.run/'+self.model+'/requests/'+remote_id
+    def submit_i2v(self, prompt, duration, first_frame, mime_type, last_frame=None, last_mime_type=None):
+        supported = ('image/png', 'image/jpeg', 'image/webp')
+        if mime_type not in supported or not isinstance(first_frame, bytes) or not first_frame:
+            raise ValueError('A supported first-frame image is required')
+        if last_frame is not None and (last_mime_type not in supported or not isinstance(last_frame, bytes) or not last_frame):
+            raise ValueError('A supported last-frame image is required')
+        headers = self.headers()
+        import fal_client
+        payload = {'prompt': prompt, 'duration': int(duration), 'image_url': fal_client.upload(first_frame, mime_type),
+                   'resolution': '720p', 'aspect_ratio': 'auto', 'generate_audio': True}
+        if last_frame is not None:
+            payload['end_image_url'] = fal_client.upload(last_frame, last_mime_type)
+        data = request_json(self.client, 'POST', 'https://queue.fal.run/' + self.i2v_model, headers=headers, json=payload)
+        rid = data.get('request_id')
+        if not rid: raise ProviderError('fal missing request_id')
+        return str(rid)
+    def poll(self,remote_id, *, model=None):
+        if model is not None and model not in (self.model, self.i2v_model):
+            raise ValueError('Unsupported Flux model')
+        base='https://queue.fal.run/blackforestlabs/flux-3-max/requests/'+remote_id
         status=request_json(self.client,'GET',base+'/status',headers=self.headers()).get('status','')
         if status == 'COMPLETED':
             data=request_json(self.client,'GET',base,headers=self.headers())

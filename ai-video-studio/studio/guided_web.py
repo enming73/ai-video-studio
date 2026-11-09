@@ -85,6 +85,10 @@ class Recover(BaseModel):
     remote_id: str | None = None
 
 
+class AbandonAttempt(BaseModel):
+    confirm_checked: bool = False
+
+
 class CharacterEdit(Revision):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=10000)
@@ -430,6 +434,16 @@ def attempt(pid: str, attempt_id: str):
 @router.post('/attempts/{attempt_id}/recover')
 def recover(pid: str, attempt_id: str, body: Recover):
     return call(guided_generation.recover, pid, attempt_id, body.remote_id)
+
+
+@router.post('/attempts/{attempt_id}/trim')
+def trim_attempt(pid: str, attempt_id: str):
+    return call(guided_generation.trim_pending, pid, attempt_id)
+
+
+@router.post('/attempts/{attempt_id}/abandon')
+def abandon_attempt(pid: str, attempt_id: str, body: AbandonAttempt):
+    return call(guided_generation.abandon_pending, pid, attempt_id, confirm_checked=body.confirm_checked)
 
 
 @router.post('/render', status_code=202)

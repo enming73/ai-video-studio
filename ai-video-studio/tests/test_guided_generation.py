@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+import subprocess
 
 from studio import core, guided_boundaries as boundaries, guided_characters as characters, guided_generation as generation, guided_images as images, guided_workflow as workflow, provider_capabilities, timeline
 from tests.helpers import add_version, attach_video
@@ -246,3 +247,58 @@ def test_minimax_rejects_undersized_boundary_frame(boundary_project, monkeypatch
                    (last_id, state['boundaries'][1]['id']))
     with pytest.raises(ValueError, match='dimensions'):
         generation.preview(pid, 1)
+
+
+def _pending_attempt(pid, tmp_path):
+    directory = tmp_path / pid / 'guided-attempts' / ('a' * 32)
+    directory.mkdir(parents=True)
+    source = directory / ('b' * 32 + '.mp4')
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=size=64x64:rate=24',
+                    '-t', '8', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source)], check=True)
+    with core.connect() as db:
+        db.execute("UPDATE shots SET duration=6 WHERE project_id=? AND seq=1", (pid,))
+        shot_id = db.execute('SELECT id FROM shots WHERE project_id=? AND seq=1', (pid,)).fetchone()[0]
+        db.execute("INSERT INTO guided_attempts(id,project_id,shot_id,request_id,prompt,duration,provider,reserved_usd,status,remote_id,video_url,error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                   ('a'*32, pid, shot_id, 'pending', 'prompt', 10, 'minimax', 1.2, 'DOWNLOAD_PENDING', 'remote', 'https://example.com/video', 'duration mismatch'))
+    return source
+
+
+def test_trim_pending_attempt_to_current_shot_duration_without_overwriting(project):
+    pid, tmp_path = project
+    source = _pending_attempt(pid, tmp_path)
+    before = source.read_bytes()
+    result = generation.trim_pending(pid, 'a'*32)
+    assert result['status'] == 'COMPLETED'
+    assert result['reserved_usd'] == 1.2
+    assert source.read_bytes() == before
+    assert Path(result['file']) != source
+    duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                              '-of', 'default=nw=1:nk=1', result['file']], text=True))
+    assert abs(duration - 6) < 0.25
+    assert result['asset_id'] in [a['id'] for a in timeline.assets(pid, 1)]
+
+
+def test_abandon_finished_remote_result_keeps_reservation_and_allows_new_attempt(project):
+    pid, tmp_path = project
+    source = _pending_attempt(pid, tmp_path)
+    with pytest.raises(ValueError):
+        generation.abandon_pending(pid, 'a'*32, confirm_checked=False)
+    result = generation.abandon_pending(pid, 'a'*32, confirm_checked=True)
+    assert result['status'] == 'ABANDONED'
+    assert result['reserved_usd'] == 1.2
+    assert result['video_url'] == 'https://example.com/video'
+    assert source.exists()
+    assert generation.submit(pid, 1, 0, confirm_paid=False, request_id='new')['status'] == 'COMPLETED'
+    generation._update(pid, 'a'*32, status='DOWNLOAD_PENDING')
+    assert generation.attempt(pid, 'a'*32)['status'] == 'ABANDONED'
+
+
+def test_trim_rejects_video_shorter_than_current_shot(project):
+    pid, tmp_path = project
+    _pending_attempt(pid, tmp_path)
+    with core.connect() as db:
+        db.execute('UPDATE shots SET duration=9 WHERE project_id=? AND seq=1', (pid,))
+    with pytest.raises(ValueError, match='shorter'):
+        generation.trim_pending(pid, 'a'*32)
+    assert generation.attempt(pid, 'a'*32)['status'] == 'DOWNLOAD_PENDING'
+    assert timeline.assets(pid, 1) == []

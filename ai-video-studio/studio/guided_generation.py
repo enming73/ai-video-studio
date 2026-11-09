@@ -3,6 +3,8 @@ import math
 import hashlib
 import mimetypes
 import os
+import re
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -102,6 +104,58 @@ def attempt(pid: str, attempt_id: str) -> dict:
         if row is None:
             raise ValueError('Unknown attempt')
         return dict(row)
+
+
+def abandon_pending(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:
+    if confirm_checked is not True:
+        raise ValueError('Explicit confirmation is required')
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        result = db.execute("UPDATE guided_attempts SET status='ABANDONED' WHERE project_id=? AND id=? AND status='DOWNLOAD_PENDING' AND video_url IS NOT NULL", (pid, attempt_id))
+        if result.rowcount != 1:
+            raise ValueError('Only a completed remote result awaiting download can be ended')
+    return attempt(pid, attempt_id)
+
+
+def trim_pending(pid: str, attempt_id: str) -> dict:
+    if not re.fullmatch(r'[0-9a-f]{32}', attempt_id):
+        raise ValueError('Invalid attempt id')
+    with core.connect() as db:
+        timeline.migrate(db)
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('''SELECT a.*, s.seq, s.duration AS current_duration, s.archived
+                            FROM guided_attempts a JOIN shots s ON s.id=a.shot_id AND s.project_id=a.project_id
+                            WHERE a.project_id=? AND a.id=?''', (pid, attempt_id)).fetchone()
+        if not row or row['status'] != 'DOWNLOAD_PENDING' or row['archived']:
+            raise ValueError('Only an active shot with a pending downloaded result can be trimmed')
+        directory = (core.HOME / pid / 'guided-attempts' / attempt_id).resolve()
+        if not directory.is_relative_to((core.HOME / pid / 'guided-attempts').resolve()):
+            raise ValueError('Invalid attempt directory')
+        sources = sorted(p for p in directory.glob('*.mp4') if re.fullmatch(r'[0-9a-f]{32}\.mp4', p.name)
+                         and p.is_file() and not p.is_symlink())
+        if not sources:
+            raise ValueError('No downloaded video found; recover the task first')
+        source = sources[0]
+        probe = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                                'stream=duration', '-of', 'default=noprint_wrappers=1:nokey=1', str(source)],
+                               capture_output=True, text=True, check=True)
+        try:
+            source_duration = float(probe.stdout.strip())
+        except ValueError:
+            raise ValueError('Cannot determine downloaded video duration') from None
+        duration = row['current_duration']
+        if not math.isfinite(source_duration) or source_duration < duration:
+            raise ValueError('Downloaded video is shorter than the current shot; cannot trim')
+        target = directory / ('trimmed-' + uuid4().hex + '.mp4')
+        core.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n', '-i', str(source), '-t', str(duration),
+                  '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                  '-c:a', 'aac', str(target)])
+        core.verify_video(target, duration)
+        shot = db.execute('SELECT * FROM shots WHERE project_id=? AND id=?', (pid, row['shot_id'])).fetchone()
+        asset_id = timeline._register(db, pid, shot, 'guided:' + attempt_id, target)
+        db.execute("UPDATE guided_attempts SET status='COMPLETED',file=?,asset_id=?,error=NULL WHERE project_id=? AND id=?",
+                   (str(target), asset_id, pid, attempt_id))
+    return attempt(pid, attempt_id)
 
 
 def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mime):
@@ -225,7 +279,7 @@ def _update(pid, aid, **values):
     if not values or not values.keys() <= allowed:
         raise ValueError('Invalid attempt update')
     with core.connect() as db:
-        db.execute('UPDATE guided_attempts SET ' + ','.join(k+'=?' for k in values) + " WHERE project_id=? AND id=? AND status!='COMPLETED'",
+        db.execute('UPDATE guided_attempts SET ' + ','.join(k+'=?' for k in values) + " WHERE project_id=? AND id=? AND status NOT IN ('COMPLETED','ABANDONED')",
                    (*values.values(), pid, aid))
 
 
@@ -251,7 +305,12 @@ def recover(pid: str, attempt_id: str, remote_id: str | None = None) -> dict:
             provider = core.PROVIDERS[state['provider']](client)
             url = state['video_url']
             if not url:
-                result = provider.poll(state['remote_id'])
+                if state['provider'] == 'flux':
+                    with core.connect() as db:
+                        provenance = db.execute('SELECT model FROM guided_video_provenance WHERE attempt_id=?', (attempt_id,)).fetchone()
+                    result = provider.poll(state['remote_id'], model=provenance['model'] if provenance else None)
+                else:
+                    result = provider.poll(state['remote_id'])
                 if result.status == 'failed':
                     _update(pid, attempt_id, status='FAILED', error=result.error)
                     return attempt(pid, attempt_id)

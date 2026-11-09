@@ -1,11 +1,16 @@
 # AI Video Studio + VBench shared Provider Core
 
-For the opt-in LLM storyboard and sequential production workflow, see
+For the opt-in LLM storyboard and guided production workflow, see
 [the guided workflow guide](docs/guided-workflow.md). That guide also covers
 character styling, approved first frames and image-to-video generation. Live CLI
 calls for storyboard, narration, speech and reference images now also require an
 explicit per-call `--budget`; these reservations are not provider-enforced spend
 caps.
+
+**Project status (2026-11-09):** Development along the current direction is
+paused. Future work may explore finer production details and workflow design;
+the scope has not yet been decided. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)
+for current capabilities, verification limits, and safe resumption notes.
 
 This repository contains Studio, VBench, and their shared provider core. The
 v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
@@ -29,6 +34,30 @@ legacy workflows and caveats below originated in v0.2.
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
 - `ai-video-studio/`: Studio CLI and local visual editor with cloud task persistence and mock mode
+
+## Guided character and boundary-frame workflow
+
+New guided projects enable the character/first-frame stage. Review and confirm
+the storyboard and cast, then create and confirm shared boundary frames: adjacent
+shots use the same boundary as the previous ending and next opening. A shot can
+be generated once both of its boundary frames are ready; shots need not be
+generated in sequence. Existing videos and image versions are preserved.
+
+The guided video model selector offers Mock, MiniMax-H3, and fal Flux 3 Max
+image-to-video. MiniMax accepts 4–15-second shots; Flux accepts 5–20 seconds.
+Flux requires `FAL_KEY` and a verified `FAL_USD_PER_SECOND`; MiniMax requires
+`MINIMAX_API_KEY` and a verified `MINIMAX_USD_PER_SECOND`. Confirm provider
+access and current pricing before a paid request. Budget reservations are not
+provider-enforced spending caps. Flux uploads both boundary images to fal CDN;
+file URLs are publicly accessible by default.
+
+For an unresolved video request, check the provider dashboard before retrying.
+Use **恢复 / 查询任务** for a known remote ID instead of resubmitting. A
+downloaded result that exceeds the shot duration can be trimmed to the current
+shot length and saved as a new asset; the original is retained. A completed
+remote result awaiting download can also be explicitly ended to allow a new
+attempt; its history and budget reservation remain. A new generation can incur
+another charge. For details see [the guided workflow guide](docs/guided-workflow.md).
 
 ## Install
 ```bash
