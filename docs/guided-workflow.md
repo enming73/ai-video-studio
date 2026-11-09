@@ -55,7 +55,7 @@ confirmation.
 
 ## First frame to video
 
-Character-enabled projects require a confirmed first frame **and** an explicitly
+Character-enabled projects require confirmed first and last boundary frames **and** an explicitly
 selected image-to-video model before video generation. The current verified
 option is `MiniMax-H3` (`image_url` with role `first_frame`, 4–15 second integer
 durations); it requires `MINIMAX_API_KEY`. Its documented frame limits are
@@ -77,7 +77,7 @@ character design.
 Edit each shot's description and integer duration directly in its card; add or
 delete cards as needed. Save the draft and confirm the whole storyboard after
 the sum equals the project duration and every shot obeys provider limits. Then
-generate each shot in order. Cloud generation requires a verified USD-per-second
+generate a shot whenever both boundary frames are confirmed. Cloud generation requires a verified USD-per-second
 environment setting and a separate confirmation and budget per attempt; Mock
 is local and free. Select a completed asset, preview it and confirm the shot
 before moving to the next one. Previous versions remain registered; each attempt
@@ -85,6 +85,13 @@ writes to a distinct path. Return to an approved shot to edit or choose another
 asset; it becomes unconfirmed, but later approvals remain unchanged. Render is
 allowed only when all shots are confirmed. Without a soundtrack, guided render
 exports a silent film.
+
+When a completed remote video is `DOWNLOAD_PENDING` but is longer than the
+current shot, use **裁剪至当前镜头长度并保存** to create a separate asset
+without changing the original. If the source is shorter, trimming is rejected.
+Alternatively, **结束旧任务，允许重生成** preserves the old request, video
+and reservation while unblocking a new attempt; the new request may incur
+additional charges. Neither action silently cancels a remote task.
 
 Generation attempts and approvals are stored in SQLite. If submission is
 uncertain, do not resubmit: check the provider dashboard, attach the verified
