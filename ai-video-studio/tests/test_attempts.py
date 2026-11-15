@@ -77,3 +77,16 @@ def test_unknown_submission_cannot_be_prepared_again(job):
     with pytest.raises(ValueError):
         attempts.prepare_submission(attempt['id'], amount_microusd=10_000,
                                     pricing_version='v1')
+
+
+def test_unknown_attempt_can_attach_remote_or_be_abandoned(job):
+    record, _ = job
+    first = add(record)
+    attempts.prepare_submission(first['id'], amount_microusd=10_000, pricing_version='v1')
+    attempts.mark_unknown(first['id'], 'timeout')
+    attached = attempts.attach_remote(first['id'], 'remote-9')
+    assert attached['status'] == 'SUBMITTED'
+    second = add(record, {'prompt': 'second'})
+    attempts.prepare_submission(second['id'], amount_microusd=10_000, pricing_version='v1')
+    attempts.mark_unknown(second['id'], 'timeout')
+    assert attempts.abandon(second['id'], 'dashboard shows no task')['status'] == 'ABANDONED'

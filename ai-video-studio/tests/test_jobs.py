@@ -80,10 +80,14 @@ def test_list_filters_by_status_and_project(project):
 
 def test_set_status_records_output_and_block_reason(project):
     job = make(project)
+    jobs.set_status(job['id'], 'RUNNING')
     output = {'file': '/tmp/x.mp4'}
     done = jobs.set_status(job['id'], 'SUCCEEDED', output=output)
     assert done['status'] == 'SUCCEEDED'
     assert json.loads(done['output_json']) == output
     blocked = make(project, key='blocked')
+    jobs.set_status(blocked['id'], 'RUNNING')
     result = jobs.set_status(blocked['id'], 'BLOCKED', block_reason='unknown_remote')
     assert result['block_reason'] == 'unknown_remote'
+    with pytest.raises(ValueError):
+        jobs.set_status(done['id'], 'PENDING')

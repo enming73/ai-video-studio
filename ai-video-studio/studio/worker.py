@@ -6,8 +6,8 @@ import threading
 import time
 from uuid import uuid4
 
-from . import attempts, jobs
-from video_provider_core import ProviderError
+from . import attempts, jobs, ledger
+from video_provider_core import ProviderError, is_retryable
 
 HANDLERS: dict[str, object] = {}
 
@@ -25,7 +25,12 @@ class JobBlocked(Exception):
 
 
 class Control:
+    def __init__(self, lease_lost=None):
+        self.lease_lost = lease_lost
+
     def checkpoint(self, job_id: str):
+        if self.lease_lost is not None and self.lease_lost.is_set():
+            raise jobs.LeaseLost('Worker no longer owns the job')
         action = jobs.stop_requested(job_id)
         if action:
             raise JobStopped(action)
@@ -40,12 +45,13 @@ def register(kind: str, handler) -> None:
     HANDLERS[kind] = handler
 
 
-def _finish_blocked(job_id: str, detail: str, reason: str = 'unknown_remote') -> None:
+def _finish_blocked(job_id: str, detail: str, reason: str = 'unknown_remote',
+                    owner: str | None = None) -> None:
     attempt = jobs.latest_attempt(job_id)
     if attempt and attempt['status'] == 'SUBMITTING':
         attempts.mark_unknown(attempt['id'], detail)
     jobs.set_status(job_id, 'BLOCKED', block_reason=reason,
-                    error_class=reason, error_detail=detail)
+                    error_class=reason, error_detail=detail, owner=owner)
 
 
 def run_once(owner: str | None = None, *, lease_seconds: int = 60,
@@ -56,56 +62,83 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
         return None
     job_id = job['id']
     stopped = threading.Event()
+    lease_lost = threading.Event()
 
     def beat():
         while not stopped.wait(heartbeat_seconds):
             if not jobs.heartbeat(job_id, owner, lease_seconds=lease_seconds):
+                lease_lost.set()
                 return
 
     beat_thread = threading.Thread(target=beat, daemon=True)
     beat_thread.start()
-    control = Control()
+    control = Control(lease_lost)
+    payload = json.loads(job['payload_json'])
     try:
-        payload = json.loads(job['payload_json'])
+        control.checkpoint(job_id)
         action = jobs.recovery_action(job_id,
                                       max_attempts=payload.get('max_attempts', 2))
         if action == 'block_unknown':
-            _finish_blocked(job_id, 'Previous submission state is unknown')
+            _finish_blocked(job_id, 'Previous submission state is unknown', owner=owner)
         elif action == 'complete':
             attempt = jobs.latest_attempt(job_id)
             output = json.loads(attempt['output_json'] or '{}')
-            jobs.set_status(job_id, 'SUCCEEDED', output=output)
+            jobs.set_status(job_id, 'SUCCEEDED', output=output, owner=owner)
         elif action == 'fail':
             attempt = jobs.latest_attempt(job_id)
             jobs.set_status(job_id, 'FAILED', error_class='attempt_failed',
-                            error_detail=(attempt or {}).get('error_detail'))
+                            error_detail=(attempt or {}).get('error_detail'), owner=owner)
         else:
             handler = HANDLERS.get(job['kind'])
             if handler is None:
                 jobs.set_status(job_id, 'FAILED', error_class='invalid_request',
-                                error_detail='No handler registered')
+                                error_detail='No handler registered', owner=owner)
             else:
                 if action == 'resume':
                     attempt = jobs.latest_attempt(job_id)
                     result = handler.resume(job, attempt, control)
                 else:
                     result = handler.execute(job, attempts, control)
-                jobs.set_status(job_id, 'SUCCEEDED', output=result or {})
+                if lease_lost.is_set():
+                    raise jobs.LeaseLost('Worker no longer owns the job')
+                jobs.set_status(job_id, 'SUCCEEDED', output=result or {}, owner=owner)
+    except jobs.LeaseLost:
+        jobs.append_event(job_id, 'lease_lost', {'owner': owner})
     except JobStopped as stop:
+        warning = {'warning': 'remote may continue and bill'}
         jobs.set_status(job_id, 'PAUSED' if stop.action == 'pause' else 'CANCELLED',
-                        block_reason=None)
+                        output=warning, owner=owner)
     except JobBlocked as blocked:
-        jobs.set_status(job_id, 'BLOCKED', block_reason=blocked.reason)
+        jobs.set_status(job_id, 'BLOCKED', block_reason=blocked.reason, owner=owner)
     except ProviderError as exc:
-        if exc.kind in ('unknown_remote', 'auth'):
+        if lease_lost.is_set():
+            jobs.append_event(job_id, 'lease_lost', {'owner': owner})
+        elif exc.kind in ('unknown_remote', 'auth'):
             _finish_blocked(job_id, str(exc),
-                            'unknown_remote' if exc.kind == 'unknown_remote' else 'auth')
+                            'unknown_remote' if exc.kind == 'unknown_remote' else 'auth',
+                            owner=owner)
+        elif is_retryable(exc):
+            attempt = jobs.latest_attempt(job_id)
+            count = len(attempts.list_for_job(job_id))
+            if attempt and attempt['status'] == 'FAILED_RETRYABLE' and count < payload.get('max_attempts', 2):
+                jobs.set_status(job_id, 'PENDING', error_class=exc.kind,
+                                error_detail=str(exc)[:1200], owner=owner)
+            else:
+                jobs.set_status(job_id, 'FAILED', error_class=exc.kind,
+                                error_detail=str(exc)[:1200], owner=owner)
         else:
             jobs.set_status(job_id, 'FAILED', error_class=exc.kind,
-                            error_detail=str(exc)[:1200])
+                            error_detail=str(exc)[:1200], owner=owner)
+    except ledger.BudgetExceeded as exc:
+        jobs.set_status(job_id, 'BLOCKED', block_reason='budget_exceeded',
+                        error_detail=str(exc), owner=owner)
     except Exception as exc:
-        jobs.set_status(job_id, 'FAILED', error_class=type(exc).__name__,
-                        error_detail=str(exc)[:1200])
+        attempt = jobs.latest_attempt(job_id)
+        if attempt and attempt['status'] == 'SUBMITTING':
+            _finish_blocked(job_id, str(exc), 'unknown_remote', owner=owner)
+        else:
+            jobs.set_status(job_id, 'FAILED', error_class=type(exc).__name__,
+                            error_detail=str(exc)[:1200], owner=owner)
     finally:
         stopped.set()
         beat_thread.join(timeout=2)

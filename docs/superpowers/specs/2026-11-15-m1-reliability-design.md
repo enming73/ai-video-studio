@@ -88,6 +88,8 @@ priority INTEGER NOT NULL DEFAULT 0
 lease_owner TEXT
 lease_expires TEXT
 cancel_requested INTEGER NOT NULL DEFAULT 0
+pause_requested INTEGER NOT NULL DEFAULT 0
+output_json TEXT
 block_reason TEXT               -- pricing_missing, budget_exceeded, auth, unknown_remote, ...
 error_class TEXT
 error_detail TEXT

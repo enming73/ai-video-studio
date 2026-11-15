@@ -87,16 +87,18 @@ def test_auth_error_blocks_without_retry(job, fake):
     with pytest.raises(ProviderError):
         video.execute(job, attempts, worker.Control())
     assert attempts.list_for_job(job['id'])[0]['status'] == 'FAILED_FINAL'
+    assert ledger.committed(job['project_id']) == 0
 
 
 def test_download_failure_does_not_resubmit(job, fake, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError('download interrupted')
     monkeypatch.setattr(video, 'download', fail)
-    with pytest.raises(OSError):
+    with pytest.raises(worker.JobBlocked) as caught:
         video.execute(job, attempts, worker.Control())
+    assert caught.value.reason == 'download_failed'
     assert FakeProvider.submits == 1
-    assert attempts.list_for_job(job['id'])[0]['status'] == 'FAILED_FINAL'
+    assert attempts.list_for_job(job['id'])[0]['status'] == 'DOWNLOADING'
 
 
 def test_resume_uses_existing_remote_and_never_submits(job, fake, monkeypatch):
@@ -112,9 +114,32 @@ def test_resume_uses_existing_remote_and_never_submits(job, fake, monkeypatch):
     assert attempts.get(attempt['id'])['status'] == 'COMPLETED'
 
 
+def test_resume_from_downloading_completes_without_submit(job, fake, monkeypatch):
+    monkeypatch.setattr(video, 'download', fake_download)
+    attempt = attempts.create(job['id'], provider='fake', model='model', input_data={})
+    attempts.prepare_submission(attempt['id'], amount_microusd=10_000,
+                                pricing_version='test:1')
+    attempts.attach_remote(attempt['id'], 'remote-1')
+    attempts.mark_status(attempt['id'], 'POLLING')
+    attempts.mark_status(attempt['id'], 'DOWNLOADING')
+    result = video.resume(job, attempts.get(attempt['id']), worker.Control())
+    assert FakeProvider.submits == 0
+    assert result['remote_id'] == 'remote-1'
+    assert attempts.get(attempt['id'])['status'] == 'COMPLETED'
+
+
 def test_missing_price_blocks_pricing_missing(job, fake):
     FakeProvider.estimate = None
     with pytest.raises(worker.JobBlocked) as caught:
         video.execute(job, attempts, worker.Control())
     assert caught.value.reason == 'pricing_missing'
+    assert attempts.list_for_job(job['id']) == []
+
+
+def test_pause_before_submit_makes_no_provider_call(job, fake):
+    jobs.set_status(job['id'], 'RUNNING')
+    jobs.pause(job['id'])
+    with pytest.raises(worker.JobStopped):
+        video.execute(job, attempts, worker.Control())
+    assert FakeProvider.submits == 0
     assert attempts.list_for_job(job['id']) == []

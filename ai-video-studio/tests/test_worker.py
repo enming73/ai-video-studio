@@ -45,6 +45,13 @@ def test_expired_lease_can_be_reclaimed(job):
     assert first['id'] == job['id']
 
 
+def test_reclaimed_job_with_stop_request_is_not_executed(job):
+    jobs.claim('worker-a', lease_seconds=60)
+    jobs.pause(job['id'])
+    assert jobs.claim('worker-b', now='9999-01-01T00:00:00+00:00') is None
+    assert jobs.get(job['id'])['status'] == 'PAUSED'
+
+
 def test_heartbeat_extends_only_for_owner(job):
     claimed = jobs.claim('worker-a', lease_seconds=60)
     before = claimed['lease_expires']
@@ -165,7 +172,7 @@ def test_worker_pauses_at_checkpoint(job):
     worker.run_once('w')
     saved = jobs.get(job['id'])
     assert saved['status'] == 'PAUSED'
-    assert saved['output_json'] is None
+    assert 'remote may continue' in saved['output_json']
 
 
 def test_worker_cli_once(tmp_path, monkeypatch):
@@ -174,3 +181,92 @@ def test_worker_cli_once(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'HOME', tmp_path)
     result = CliRunner().invoke(app, ['worker', '--once'])
     assert result.exit_code == 0
+
+
+def test_worker_stops_before_submit_when_paused(job):
+    class Pausing:
+        def execute(self, record, service, control):
+            jobs.pause(record['id'])
+            control.checkpoint(record['id'])
+            return {'should_not': True}
+    worker.register('video', Pausing())
+    worker.run_once('w')
+    assert jobs.get(job['id'])['status'] == 'PAUSED'
+
+
+def test_worker_does_not_overwrite_after_lease_loss(job, monkeypatch):
+    monkeypatch.setattr(jobs, 'heartbeat', lambda *args, **kwargs: False)
+
+    class Slow:
+        def execute(self, record, service, control):
+            time.sleep(0.1)
+            return {'late': True}
+
+    worker.register('video', Slow())
+    worker.run_once('w', lease_seconds=1, heartbeat_seconds=0.01)
+    assert jobs.get(job['id'])['status'] == 'RUNNING'
+    with core.connect() as db:
+        assert db.execute("SELECT 1 FROM job_events WHERE job_id=? AND type='lease_lost'",
+                          (job['id'],)).fetchone() is not None
+
+
+def test_worker_retries_retryable_not_sent_failure(job):
+    from video_provider_core import ProviderError
+
+    class Failing:
+        def execute(self, record, service, control):
+            from studio import attempts, ledger
+            attempt = service.create(record['id'], provider='fake', model='m', input_data={})
+            service.prepare_submission(attempt['id'], amount_microusd=1_000,
+                                       pricing_version='v1')
+            service.mark_failed(attempt['id'], 'FAILED_RETRYABLE', '429',
+                                error_class='rate_limited')
+            raise ProviderError('429', kind='rate_limited', submission_state='not_sent')
+
+    worker.register('video', Failing())
+    worker.run_once('w')
+    assert jobs.get(job['id'])['status'] == 'PENDING'
+
+
+def test_worker_maps_budget_failure_to_blocked(job):
+    from studio import ledger as ledger_module
+
+    class Broke:
+        def execute(self, record, service, control):
+            raise ledger_module.BudgetExceeded('project', 10, 5, 1)
+
+    worker.register('video', Broke())
+    worker.run_once('w')
+    assert jobs.get(job['id'])['status'] == 'BLOCKED'
+    assert jobs.get(job['id'])['block_reason'] == 'budget_exceeded'
+
+
+def test_worker_blocks_generic_error_after_submitting(job):
+    class Broken:
+        def execute(self, record, service, control):
+            attempt = service.create(record['id'], provider='fake', model='m',
+                                     input_data={})
+            service.prepare_submission(attempt['id'], amount_microusd=1_000,
+                                       pricing_version='v1')
+            raise RuntimeError('unexpected after submit')
+
+    worker.register('video', Broken())
+    worker.run_once('w')
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'BLOCKED'
+    assert saved['block_reason'] == 'unknown_remote'
+    assert jobs.latest_attempt(job['id'])['status'] == 'UNKNOWN_REMOTE_STATE'
+
+
+def test_worker_cancel_at_checkpoint_keeps_remote_warning(job):
+    class Cancelling:
+        def execute(self, record, service, control):
+            jobs.cancel(record['id'])
+            control.checkpoint(record['id'])
+            return {'never': True}
+
+    worker.register('video', Cancelling())
+    worker.run_once('w')
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'CANCELLED'
+    assert 'remote may continue' in saved['output_json']

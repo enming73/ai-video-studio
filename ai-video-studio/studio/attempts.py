@@ -12,7 +12,7 @@ ACTIVE = ('PLANNED', 'RESERVED', 'SUBMITTING', 'SUBMITTED',
 TERMINAL = ('COMPLETED', 'FAILED_RETRYABLE', 'FAILED_FINAL',
             'UNKNOWN_REMOTE_STATE', 'ABANDONED')
 ALLOWED = {
-    'PLANNED': {'RESERVED', 'SUBMITTING', 'ABANDONED'},
+    'PLANNED': {'RESERVED', 'ABANDONED'},
     'RESERVED': {'SUBMITTING', 'ABANDONED'},
     'SUBMITTING': {'SUBMITTED', 'FAILED_RETRYABLE', 'FAILED_FINAL',
                    'UNKNOWN_REMOTE_STATE', 'ABANDONED'},
@@ -20,6 +20,7 @@ ALLOWED = {
     'POLLING': {'DOWNLOADING', 'UNKNOWN_REMOTE_STATE', 'FAILED_FINAL', 'ABANDONED'},
     'DOWNLOADING': {'VALIDATING', 'UNKNOWN_REMOTE_STATE', 'FAILED_FINAL', 'ABANDONED'},
     'VALIDATING': {'COMPLETED', 'UNKNOWN_REMOTE_STATE', 'FAILED_FINAL', 'ABANDONED'},
+    'UNKNOWN_REMOTE_STATE': {'SUBMITTED', 'ABANDONED'},
 }
 
 
@@ -164,12 +165,15 @@ def mark_unknown(attempt_id: str, detail: str, db=None) -> dict:
                            {'error_detail': str(detail)[:1200]})
 
 
-def mark_failed(attempt_id: str, kind: str, detail: str, db=None) -> dict:
+def mark_failed(attempt_id: str, kind: str, detail: str, *, error_class: str | None = None,
+                retry_after_sec: int | None = None, db=None) -> dict:
     if kind not in ('FAILED_RETRYABLE', 'FAILED_FINAL'):
         raise ValueError('Invalid failure kind')
     with _tx(db) as conn:
         return _transition(conn, attempt_id, kind,
-                           {'error_detail': str(detail)[:1200]})
+                           {'error_detail': str(detail)[:1200],
+                            'error_class': error_class,
+                            'retry_after_sec': retry_after_sec})
 
 
 def mark_status(attempt_id: str, status: str, db=None) -> dict:

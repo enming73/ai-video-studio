@@ -13,7 +13,7 @@ from video_provider_core import (
 )
 from video_provider_core.media import download
 
-from .. import core, attempts as attempt_store
+from .. import core, attempts as attempt_store, ledger
 
 MAX_FRAME_BYTES = 20 * 1024 * 1024
 
@@ -72,7 +72,7 @@ def _sleep(payload: dict):
 
 def _finish(job, attempt, payload, provider, control, client):
     root = Path(core.HOME) / job['project_id']
-    if attempt['status'] == 'SUBMITTED':
+    if attempt['status'] in ('SUBMITTED', 'UNKNOWN_REMOTE_STATE'):
         attempt = attempt_store.mark_status(attempt['id'], 'POLLING')
     remote_id = attempt['remote_id']
     while True:
@@ -84,23 +84,31 @@ def _finish(job, attempt, payload, provider, control, client):
             attempt_store.mark_unknown(attempt['id'], str(exc))
             control.block('unknown_remote')
         if status.state == 'failed':
+            attempt_store.mark_failed(attempt['id'], 'FAILED_FINAL',
+                                      status.error_detail or 'Provider failed',
+                                      error_class='provider_failed')
             raise RuntimeError(status.error_detail or 'Provider reported failure')
+        if status.state in ('cancelled', 'unknown'):
+            attempt_store.mark_failed(attempt['id'], 'FAILED_FINAL',
+                                      status.error_detail or status.state,
+                                      error_class=status.state)
+            raise RuntimeError(f'Provider status {status.state}')
         if status.state == 'succeeded':
             break
-        if status.state in ('cancelled', 'unknown'):
-            raise RuntimeError(f'Provider status {status.state}')
         _sleep(payload)
-    attempt_store.mark_status(attempt['id'], 'DOWNLOADING')
+    if attempt['status'] in ('POLLING', 'SUBMITTED'):
+        attempt_store.mark_status(attempt['id'], 'DOWNLOADING')
+        attempt = attempt_store.get(attempt['id'])
     target = root / 'jobs' / job['id'] / f'{uuid4().hex}.mp4'
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         download(client, status.url, target)
-        attempt_store.mark_status(attempt['id'], 'VALIDATING')
+        if attempt['status'] == 'DOWNLOADING':
+            attempt_store.mark_status(attempt['id'], 'VALIDATING')
         core.verify_video(target, payload['duration_sec'])
     except Exception:
-        attempt_store.mark_failed(attempt['id'], 'FAILED_FINAL',
-                                  'Local download or validation failed')
-        raise
+        # Keep the remote id and attempt state so recovery can download again.
+        control.block('download_failed')
     output = {
         'file': str(target),
         'remote_id': remote_id,
@@ -111,6 +119,7 @@ def _finish(job, attempt, payload, provider, control, client):
 
 
 def execute(job, attempts, control):
+    control.checkpoint(job['id'])
     payload = _payload(job)
     root = Path(core.HOME) / job['project_id']
     request = _request(job, payload, root)
@@ -120,20 +129,24 @@ def execute(job, attempts, control):
         amount, pricing = _reservation(job, payload, provider, request)
         if amount is None:
             control.block('pricing_missing')
+        control.checkpoint(job['id'])
         attempt = attempts.create(job['id'], provider=payload['provider'],
                                   model=payload.get('model', ''), input_data=payload)
-        attempts.prepare_submission(attempt['id'], amount_microusd=amount,
-                                    pricing_version=pricing)
+        entry = attempts.prepare_submission(attempt['id'], amount_microusd=amount,
+                                            pricing_version=pricing)
+        control.checkpoint(job['id'])
         try:
             remote = provider.submit_video(request, attempt['idempotency_key'])
         except ProviderError as exc:
             if exc.kind == 'unknown_remote' or exc.submission_state == 'maybe_sent':
                 attempts.mark_unknown(attempt['id'], str(exc))
                 control.block('unknown_remote')
+            ledger.release(entry, evidence=f'provider rejected before submission: {exc.kind}')
             attempts.mark_failed(
                 attempt['id'],
                 'FAILED_RETRYABLE' if is_retryable(exc) else 'FAILED_FINAL',
-                str(exc))
+                str(exc), error_class=exc.kind,
+                retry_after_sec=exc.retry_after_sec)
             raise
         attempts.attach_remote(attempt['id'], remote.remote_id)
         attempt = attempts.get(attempt['id'])
@@ -141,6 +154,7 @@ def execute(job, attempts, control):
 
 
 def resume(job, attempt, control):
+    control.checkpoint(job['id'])
     payload = _payload(job)
     if not attempt or not attempt.get('remote_id'):
         control.block('unknown_remote')
@@ -148,7 +162,4 @@ def resume(job, attempt, control):
     with httpx.Client(timeout=httpx.Timeout(40, connect=15),
                       follow_redirects=False) as client:
         provider = _provider(payload['provider'], client)
-        if attempt['status'] == 'SUBMITTED':
-            from .. import attempts as attempt_service
-            attempt = attempt_service.mark_status(attempt['id'], 'POLLING')
         return _finish(job, attempt, payload, provider, control, client)

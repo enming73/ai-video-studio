@@ -10,6 +10,16 @@ from . import core
 
 TERMINAL = ('SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED')
 STATUSES = ('PENDING', 'RUNNING', 'PAUSED', *TERMINAL)
+_TRANSITIONS = {
+    'PENDING': {'RUNNING', 'PAUSED', 'CANCELLED', 'FAILED'},
+    'RUNNING': {'PENDING', 'PAUSED', 'CANCELLED', 'SUCCEEDED', 'FAILED', 'BLOCKED'},
+    'PAUSED': {'PENDING', 'CANCELLED', 'FAILED', 'BLOCKED'},
+    **{status: set() for status in TERMINAL},
+}
+
+
+class LeaseLost(ValueError):
+    pass
 
 
 def _canonical(payload: dict) -> str:
@@ -152,18 +162,27 @@ def latest_attempt(job_id: str, db=None) -> dict | None:
 
 def set_status(job_id: str, status: str, *, error_class: str | None = None,
                error_detail: str | None = None, block_reason: str | None = None,
-               output: dict | None = None, db=None) -> dict:
+               output: dict | None = None, owner: str | None = None, db=None) -> dict:
     if status not in STATUSES:
         raise ValueError('Invalid job status')
     with _tx(db) as conn:
-        _row(conn, job_id)
-        conn.execute(
-            'UPDATE jobs SET status=?,error_class=COALESCE(?,error_class),'
-            'error_detail=COALESCE(?,error_detail),block_reason=COALESCE(?,block_reason),'
-            'output_json=COALESCE(?,output_json),updated=? WHERE id=?',
-            (status, error_class, error_detail, block_reason,
-             json.dumps(output, ensure_ascii=False, sort_keys=True) if output is not None else None,
-             core.now(), job_id))
+        job = _row(conn, job_id)
+        if status not in _TRANSITIONS[job['status']]:
+            raise ValueError(f"Illegal job transition {job['status']} -> {status}")
+        if owner is not None and (job['lease_owner'] != owner
+                                  or job['status'] != 'RUNNING'):
+            raise LeaseLost('Worker no longer owns the job')
+        clause = ' AND lease_owner=?' if owner is not None else ''
+        values = (status, error_class, error_detail, block_reason,
+                  json.dumps(output, ensure_ascii=False, sort_keys=True)
+                  if output is not None else None, core.now(), job_id)
+        if owner is not None:
+            values += (owner,)
+        changed = conn.execute(
+            'UPDATE jobs SET status=?,error_class=?,error_detail=?,block_reason=?,'
+            f'output_json=?,updated=? WHERE id=?{clause}', values).rowcount
+        if changed != 1:
+            raise LeaseLost('Worker no longer owns the job')
         _append(conn, job_id, 'status', {'status': status,
                                          'block_reason': block_reason,
                                          'error_class': error_class})
@@ -241,9 +260,20 @@ def claim(owner: str, *, lease_seconds: int = 60, now: str | None = None,
         raise ValueError('Invalid lease duration')
     current, expiry = _future(now, lease_seconds)
     with _tx(db) as conn:
+        flagged = conn.execute(
+            "SELECT id,cancel_requested,pause_requested FROM jobs WHERE status='RUNNING' "
+            'AND lease_expires IS NOT NULL AND lease_expires <= ? '
+            'AND (cancel_requested=1 OR pause_requested=1)', (current,)).fetchall()
+        for item in flagged:
+            target = 'CANCELLED' if item['cancel_requested'] else 'PAUSED'
+            conn.execute(
+                'UPDATE jobs SET status=?,lease_owner=NULL,lease_expires=NULL,updated=? '
+                'WHERE id=?', (target, current, item['id']))
+            _append(conn, item['id'], 'stopped_before_claim', {'status': target})
         row = conn.execute(
-            "SELECT * FROM jobs WHERE status='PENDING' OR "
-            "(status='RUNNING' AND lease_expires IS NOT NULL AND lease_expires <= ?) "
+            "SELECT * FROM jobs WHERE (status='PENDING' OR "
+            "(status='RUNNING' AND lease_expires IS NOT NULL AND lease_expires <= ?)) "
+            'AND cancel_requested=0 AND pause_requested=0 '
             'ORDER BY priority DESC, created, id LIMIT 1', (current,)).fetchone()
         if row is None:
             return None
@@ -281,10 +311,11 @@ def heartbeat(job_id: str, owner: str, *, lease_seconds: int = 60,
 
 def release(job_id: str, owner: str, db=None) -> None:
     with _tx(db) as conn:
-        conn.execute(
+        changed = conn.execute(
             "UPDATE jobs SET lease_owner=NULL,lease_expires=NULL,updated=? "
-            "WHERE id=? AND lease_owner=?", (core.now(), job_id, owner))
-        _append(conn, job_id, 'lease_released', {'owner': owner})
+            "WHERE id=? AND lease_owner=?", (core.now(), job_id, owner)).rowcount
+        if changed == 1:
+            _append(conn, job_id, 'lease_released', {'owner': owner})
 
 
 def recovery_action(job_id: str, *, max_attempts: int = 2, db=None) -> str:
@@ -296,8 +327,10 @@ def recovery_action(job_id: str, *, max_attempts: int = 2, db=None) -> str:
     status = attempt['status']
     if status == 'COMPLETED':
         return 'complete'
-    if status in ('SUBMITTING', 'UNKNOWN_REMOTE_STATE'):
+    if status == 'SUBMITTING':
         return 'block_unknown'
+    if status == 'UNKNOWN_REMOTE_STATE':
+        return 'resume' if attempt['remote_id'] else 'block_unknown'
     if status in ('SUBMITTED', 'POLLING', 'DOWNLOADING', 'VALIDATING'):
         return 'resume' if attempt['remote_id'] else 'block_unknown'
     if status == 'FAILED_RETRYABLE':
