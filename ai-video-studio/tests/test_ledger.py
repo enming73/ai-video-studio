@@ -64,6 +64,22 @@ def test_run_budget_is_enforced_independently(project):
         reserve(project, 600_000, run_id)
     assert caught.value.scope == 'run'
     assert caught.value.limit_microusd == 500_000
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM cost_entries').fetchone()[0] == 0
+
+
+def test_reserve_rejects_run_from_another_project(project):
+    other = core.create('Other project', 20, 'mock', 1.0)
+    other_run = ledger.open_run(other, 1_000_000)
+    with pytest.raises(ValueError, match='another project'):
+        reserve(project, 100_000, other_run)
+
+
+def test_reserve_requires_a_nonempty_open_run(project):
+    with pytest.raises(ValueError, match='run'):
+        reserve(project, 100_000, None)
+    with pytest.raises(ValueError, match='run'):
+        reserve(project, 100_000, '')
 
 
 def test_closed_run_rejects_reservation(project):
@@ -164,4 +180,22 @@ def test_summary_groups_by_stage(project):
     assert summary['by_stage']['video']['committed_microusd'] == 200_000
     assert summary['by_stage']['image']['committed_microusd'] == 80_000
     assert summary['by_stage']['tts']['unknown_count'] == 1
+
+
+def test_committed_and_summary_agree_for_every_status(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    reserve(project, 200_000, run_id, 'video')
+    settled = reserve(project, 100_000, run_id, 'image')
+    ledger.settle(settled, 60_000, 'invoice')
+    unknown = reserve(project, 50_000, run_id, 'tts')
+    ledger.mark_unknown(unknown)
+    released = reserve(project, 40_000, run_id, 'vision')
+    ledger.release(released, 'provider confirms no task')
+    with core.connect() as db:
+        db.execute(
+            'INSERT INTO cost_entries(id,project_id,run_id,stage,provider,model,'
+            'pricing_version,reserved_microusd,billing_status,created,updated) '
+            "VALUES ('local',?,?,'local_render','local','ffmpeg','local-v1',0,"
+            "'not_applicable','now','now')", (project, run_id))
+    assert ledger.committed(project) == ledger.summary(project)['committed_microusd'] == 310_000
 

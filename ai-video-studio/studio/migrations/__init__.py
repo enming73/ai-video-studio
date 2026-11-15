@@ -107,6 +107,19 @@ def _load_python(path: Path):
     return module
 
 
+def _statements(sql: str):
+    buffer = ''
+    for line in sql.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            if statement:
+                yield statement
+            buffer = ''
+    if buffer.strip():
+        raise ValueError('Incomplete SQL migration statement')
+
+
 def _record(db, item: Migration) -> None:
     db.execute(
         'INSERT OR IGNORE INTO schema_migrations(version,name,checksum,applied_at) '
@@ -132,19 +145,17 @@ def apply(db, db_path: Path, *, directory: Path | None = None,
     db.commit()
     applied: list[int] = []
     for item in to_apply:
-        if item.path.suffix == '.sql':
-            db.executescript(item.path.read_text(encoding='utf-8'))
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            if item.path.suffix == '.sql':
+                for statement in _statements(item.path.read_text(encoding='utf-8')):
+                    db.execute(statement)
+            else:
+                _load_python(item.path).apply(db)
             _record(db, item)
             db.commit()
-        else:
-            module = _load_python(item.path)
-            db.execute('BEGIN IMMEDIATE')
-            try:
-                module.apply(db)
-                _record(db, item)
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
+        except Exception:
+            db.rollback()
+            raise
         applied.append(item.version)
     return applied

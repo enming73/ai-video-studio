@@ -95,21 +95,26 @@ def _project_limit(conn, pid: str) -> int:
     return to_micro(core.project(conn, pid)['budget'])
 
 
-def _run_limit(conn, run_id: str) -> int | None:
+def _run_limit(conn, run_id: str, pid: str) -> int | None:
     row = conn.execute(
-        'SELECT status,budget_limit_microusd FROM runs WHERE id=?', (run_id,)).fetchone()
+        'SELECT project_id,status,budget_limit_microusd FROM runs WHERE id=?',
+        (run_id,)).fetchone()
     if row is None:
         raise ValueError('Unknown run')
+    if row['project_id'] != pid:
+        raise ValueError('Run belongs to another project')
     if row['status'] != 'OPEN':
         raise ValueError('Run is not open')
     return row['budget_limit_microusd']
 
 
+_SETTLED_AMOUNT = (
+    "CASE WHEN billing_status='settled' THEN actual_microusd ELSE 0 END")
+_OPEN_AMOUNT = (
+    "CASE WHEN billing_status IN ('reserved','unknown') THEN reserved_microusd ELSE 0 END")
 _COMMITTED_SQL = (
-    "SELECT COALESCE(SUM(CASE WHEN billing_status='settled' THEN actual_microusd "
-    "WHEN billing_status IN ('reserved','unknown') THEN reserved_microusd ELSE 0 END),0) "
-    "FROM cost_entries WHERE project_id=?"
-)
+    f'SELECT COALESCE(SUM({_SETTLED_AMOUNT}+{_OPEN_AMOUNT}),0) '
+    'FROM cost_entries WHERE project_id=?')
 
 
 def _committed(conn, pid: str, run_id: str | None = None) -> int:
@@ -129,17 +134,19 @@ def reserve(pid: str, *, stage: str, provider: str, model: str,
         raise ValueError('Reservation must be a positive integer')
     if not isinstance(pricing_version, str) or not pricing_version.strip():
         raise ValueError('Pricing version is required')
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError('An open run is required for a paid reservation')
     if not all(isinstance(value, str) and value for value in (stage, provider, model)):
         raise ValueError('Stage, provider and model are required')
     with _transaction(db) as conn:
         core.project(conn, pid)
-        run_limit = _run_limit(conn, run_id) if run_id else None
+        run_limit = _run_limit(conn, run_id, pid)
         project_limit = _project_limit(conn, pid)
         project_committed = _committed(conn, pid)
         if project_committed + amount_microusd > project_limit:
             raise BudgetExceeded('project', project_committed,
                                  project_limit, amount_microusd)
-        if run_id is not None and run_limit is not None:
+        if run_limit is not None:
             run_committed = _committed(conn, pid, run_id)
             if run_committed + amount_microusd > run_limit:
                 raise BudgetExceeded('run', run_committed,
@@ -212,10 +219,8 @@ def summary(pid: str, run_id: str | None = None, db=None) -> dict:
     conn = db or core.connect()
     try:
         sql = ('SELECT stage,billing_status,COUNT(*) AS count,'
-               'COALESCE(SUM(CASE WHEN billing_status=\'settled\' THEN actual_microusd '
-               'ELSE 0 END),0) AS settled,'
-               'COALESCE(SUM(CASE WHEN billing_status IN (\'reserved\',\'unknown\') '
-               'THEN reserved_microusd ELSE 0 END),0) AS open,'
+               f'COALESCE(SUM({_SETTLED_AMOUNT}),0) AS settled,'
+               f'COALESCE(SUM({_OPEN_AMOUNT}),0) AS open,'
                'COALESCE(SUM(CASE WHEN billing_status=\'unknown\' THEN 1 ELSE 0 END),0) '
                'AS unknown_count FROM cost_entries WHERE project_id=?')
         args = [pid]

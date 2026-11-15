@@ -57,6 +57,24 @@ def test_changed_checksum_blocks_startup(tmp_path):
             migrations.pending(db, directory=directory)
 
 
+def test_failing_sql_migration_rolls_back_entirely(tmp_path):
+    db_path = tmp_path / 'studio.sqlite3'
+    directory = make_migration_dir(tmp_path)
+    (directory / '002_bad.sql').write_text(
+        'CREATE TABLE IF NOT EXISTS should_not_survive(id TEXT);\n'
+        'THIS IS NOT SQL;\n', encoding='utf-8')
+    with open_db(db_path) as db:
+        with pytest.raises(sqlite3.OperationalError):
+            migrations.apply(db, db_path, directory=directory,
+                             backup_root=tmp_path / 'backups')
+        assert db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='should_not_survive'").fetchone() is None
+        versions = [row[0] for row in db.execute(
+            'SELECT version FROM schema_migrations ORDER BY version')]
+    assert versions == [1]
+
+
 def test_empty_database_is_not_backed_up(tmp_path):
     db_path = tmp_path / 'studio.sqlite3'
     directory = make_migration_dir(tmp_path)
@@ -81,6 +99,10 @@ def test_existing_database_is_backed_up_before_migration(tmp_path):
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
         assert backup.execute('SELECT id FROM projects').fetchone()[0] == 'legacy-project'
+        tables = {row[0] for row in backup.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert 'runs' not in tables
+        assert 'schema_migrations' not in tables
     with open_db(db_path) as db:
         assert db.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == 1
 
