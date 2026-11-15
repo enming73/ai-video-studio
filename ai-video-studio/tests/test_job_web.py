@@ -105,6 +105,10 @@ def test_production_status_survives_restart(api, tmp_path, monkeypatch):
         'live': True, 'budget': 5, 'confirm_paid': True,
         'confirmation_project_id': pid}).json()
     run_id = created['run_id']
+    from fastapi.testclient import TestClient
+    from studio import webapp
+    api.close()
+    api = TestClient(webapp.app)
     status = api.get(f'/api/projects/{pid}/production/jobs/{run_id}')
     assert status.status_code == 200
     assert status.json()['run_id'] == run_id
