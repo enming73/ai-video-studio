@@ -1,34 +1,53 @@
-"""Verified text-to-video duration capabilities, in whole seconds."""
+"""Verified provider capabilities, delegated to the shared provider contract."""
+from __future__ import annotations
 
-_CAPABILITIES = {
-    ('mock', 'mock'): (range(1, 31), 'Local mock generator'),
-    ('minimax', 'MiniMax-H3'): (range(4, 16), 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create'),
-    ('wan', 'wan3.0-video'): (range(2, 31), 'https://www.alibabacloud.com/help/en/model-studio/wan3-video-generation-api-reference'),
-    ('flux', 'blackforestlabs/flux-3-max/text-to-video'): (range(5, 21), 'https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=blackforestlabs%2Fflux-3-max%2Ftext-to-video'),
+from video_provider_core import Flux, MiniMax, Wan
+
+# Capabilities are static metadata from the real adapters, independent of any
+# runtime adapter substitution used by tests or future routing.
+_REAL = {'minimax': MiniMax, 'flux': Flux, 'wan': Wan}
+
+_MOCK = {
+    'text': (range(1, 31), 'Local mock generator'),
+    'i2v': (range(1, 31), 'Local mock; no AI video generation'),
 }
 
-_I2V = {
-    ('mock', 'mock'): (range(1, 31), 'Local mock; no AI video generation', True),
-    ('minimax', 'MiniMax-H3'): (range(4, 16), 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create', True),
-    ('flux', 'blackforestlabs/flux-3-max/image-to-video'): (range(5, 21), 'https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=blackforestlabs%2Fflux-3-max%2Fimage-to-video', True),
-}
+
+def _contract(provider: str, model: str, i2v: bool):
+    if provider == 'mock':
+        durations, source = _MOCK['i2v' if i2v else 'text']
+        return {'durations': list(durations), 'source': source,
+                'first_last_frame': i2v}
+    cls = _REAL.get(provider)
+    if cls is None:
+        return None
+    try:
+        capability = cls(None).capabilities(model=model, i2v=i2v)
+    except Exception:
+        # Invalid local provider configuration must not crash capability checks.
+        return None
+    if capability is None:
+        return None
+    return {'durations': list(capability.durations),
+            'source': capability.source,
+            'first_last_frame': capability.supports_first_frame
+            and capability.supports_last_frame}
 
 
 def i2v_capabilities(provider: str, model: str) -> dict:
-    item = _I2V.get((provider, model))
+    item = _contract(provider, model, True)
     if item is None:
-        return {'verified': False, 'durations': [], 'source': None, 'first_last_frame': False}
-    durations, source, first_last_frame = item
-    return {'verified': True, 'durations': list(durations), 'source': source,
-            'first_last_frame': first_last_frame}
+        return {'verified': False, 'durations': [], 'source': None,
+                'first_last_frame': False}
+    return {'verified': True, **item}
 
 
 def capabilities(provider: str, model: str) -> dict:
-    item = _CAPABILITIES.get((provider, model))
+    item = _contract(provider, model, False)
     if item is None:
         return {'verified': False, 'durations': [], 'source': None}
-    durations, source = item
-    return {'verified': True, 'durations': list(durations), 'source': source}
+    return {'verified': True, 'durations': item['durations'],
+            'source': item['source']}
 
 
 def _check(total, allowed):
