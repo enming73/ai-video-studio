@@ -323,6 +323,39 @@ def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatc
     assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
 
 
+def test_guided_job_success_survives_reconcile_failure(boundary_project, monkeypatch):
+    from studio import guided_compat, jobs, worker
+    from studio.handlers import video
+    from video_provider_core import CostEstimate, RemoteJob, RemoteStatus
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=5 WHERE id=?', (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    generation.set_video_model(pid, 'minimax', 'MiniMax-H3', state['revision'])
+    confirm_pair(pid, workflow.get(pid), 0, 1)
+    result = generation.submit(pid, 1, 1, confirm_paid=True, request_id='reconcile-fail')
+    class Provider:
+        def __init__(self, client): pass
+        def estimate_cost(self, request):
+            return CostEstimate(800_000, 'test:v1', 'test')
+        def submit_video(self, request, key):
+            return RemoteJob('minimax', 'known')
+        def status(self, remote, *, model=None):
+            return RemoteStatus('succeeded', url='https://example.test/video')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    monkeypatch.setitem(worker.HANDLERS, 'video', video)
+    monkeypatch.setattr(video, 'download', lambda client, url, target: target.write_bytes(b'completed'))
+    monkeypatch.setattr(core, 'verify_video', lambda target, duration: None)
+    monkeypatch.setattr(guided_compat, 'reconcile_outputs',
+                        lambda pid: (_ for _ in ()).throw(RuntimeError('asset registry unavailable')))
+    assert worker.run_once() == result['id']
+    assert jobs.get(result['id'])['status'] == 'SUCCEEDED'
+    with core.connect() as db:
+        event = db.execute("SELECT data_json FROM job_events WHERE job_id=? AND type='guided_reconcile_failed'",
+                           (result['id'],)).fetchone()
+    assert 'asset registry unavailable' in event['data_json']
+
+
 def test_worker_rejects_changed_confirmed_boundary(boundary_project, monkeypatch):
     from studio import jobs
     from studio.handlers import video

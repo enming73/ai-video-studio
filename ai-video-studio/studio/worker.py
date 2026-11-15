@@ -104,7 +104,11 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
                 jobs.set_status(job_id, 'SUCCEEDED', output=result or {}, owner=owner)
                 if payload.get('guided_request_id'):
                     from . import guided_compat
-                    guided_compat.reconcile_outputs(job['project_id'])
+                    try:
+                        guided_compat.reconcile_outputs(job['project_id'])
+                    except Exception as exc:
+                        jobs.append_event(job_id, 'guided_reconcile_failed',
+                                          {'error': str(exc)[:500]})
     except jobs.LeaseLost:
         jobs.append_event(job_id, 'lease_lost', {'owner': owner})
     except JobStopped as stop:
