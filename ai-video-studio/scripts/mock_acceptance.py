@@ -1,0 +1,220 @@
+"""Offline legacy media baseline. Run in its own process, never inside the API."""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import platform
+import re
+import subprocess
+import sys
+import time
+from contextlib import ExitStack
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+from studio import core, sound, timeline
+
+
+_spec = importlib.util.spec_from_file_location(
+    'acceptance_evidence', Path(__file__).with_name('acceptance_evidence.py'))
+evidence = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(evidence)
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _command(args):
+    return subprocess.run(args, capture_output=True, text=True, check=True, timeout=180)
+
+
+def _identity():
+    source = {'commit': None, 'dirty': None, 'errors': []}
+    environment = {'python': platform.python_version(), 'ffmpeg': None,
+                   'ffprobe': None, 'errors': []}
+    try:
+        source['commit'] = _command(['git', '-C', str(REPO), 'rev-parse', 'HEAD']).stdout.strip()
+        source['dirty'] = bool(_command(['git', '-C', str(REPO), 'status', '--porcelain']).stdout.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        source['errors'].append(type(exc).__name__ + ': git identity unavailable')
+    for tool in ('ffmpeg', 'ffprobe'):
+        try:
+            environment[tool] = _command([tool, '-version']).stdout.splitlines()[0]
+        except (OSError, subprocess.SubprocessError) as exc:
+            environment['errors'].append(type(exc).__name__ + f': {tool} unavailable')
+    return source, environment
+
+
+def _check(report, name, passed, details):
+    report['checks'].append({'id': name, 'status': 'passed' if passed else 'failed',
+                             'evidence': details})
+    if not passed:
+        raise RuntimeError(f'Acceptance check failed: {name}')
+
+
+def _file(root, path):
+    return {'path': str(path.resolve().relative_to(root)),
+            'sha256': evidence.file_hash(path)}
+
+
+def _video(root, path):
+    result = _file(root, path)
+    result['probe'] = evidence.inspect_video(path)
+    return result
+
+
+def _captions(path, revised=False):
+    blocks = []
+    for seq in range(1, 7):
+        start, end = (seq - 1) * 10, seq * 10
+        blocks.append(
+            f'{seq}\n{sound._srt_timestamp(start)} --> {sound._srt_timestamp(end)}\n'
+            f'M0 {"revised" if revised else "baseline"} - shot {seq} - synthetic media\n')
+    path.write_text('\n'.join(blocks), encoding='utf-8')
+
+
+def _audio_evidence(path):
+    proc = _command(['ffmpeg', '-hide_banner', '-i', str(path), '-vn',
+                     '-af', 'volumedetect', '-f', 'null', '-'])
+    match = re.search(r'mean_volume:\s*(-?[\d.]+|-inf) dB', proc.stderr)
+    if match is None:
+        raise RuntimeError('No audio volume measurement')
+    value = float(match.group(1))
+    # JSON has no infinity; None means silence/unavailable, never a pass.
+    return {'mean_volume_db': value if value != float('-inf') else None}
+
+
+def _render(root, pid, report, name, subtitles):
+    output = sound.export(pid, source='selected', burn_subtitles=True)
+    video = _video(root, output)
+    audio = _audio_evidence(output)
+    manifest = output.with_suffix('.json')
+    data = json.loads(manifest.read_text())
+    config = dict(data['config'])
+    for key in ('narration', 'music', 'ambience', 'subtitles'):
+        if config.get(key):
+            config[key] = _file(root, Path(config[key]))
+    selections = [{'seq': item['seq'], 'asset_id': item['selected']['id']}
+                  for item in timeline.timeline(pid)]
+    report['artifacts'][name] = {
+        'video': video, 'audio': audio, 'subtitles': _file(root, subtitles),
+        'manifest': _file(root, manifest), 'soundtrack': config, 'selections': selections,
+    }
+    probe = video['probe']
+    _check(report, name + '_video', (
+        probe['readable'] and abs(probe['duration_sec'] - 60) <= 0.25
+        and (probe['width'], probe['height'], probe['fps']) == (1280, 720, 24)
+        and probe['has_audio']
+    ), probe)
+    _check(report, name + '_audible', audio['mean_volume_db'] is not None
+           and audio['mean_volume_db'] > -60, audio)
+    _check(report, name + '_subtitle_configuration',
+           data['burn_subtitles'] is True and subtitles.read_text().count(' --> ') == 6,
+           {'subtitle_path': str(subtitles.relative_to(root)),
+            'limitation': 'Configuration only; human readability not verified'})
+    return output
+
+
+def run_baseline(output_root: Path) -> Path:
+    """Exclusive output directory; no remote calls; restores all process patches."""
+    output_root = Path(output_root).expanduser()
+    output_root.mkdir(parents=True, exist_ok=False)
+    root = output_root.resolve()
+    started = time.monotonic()
+    source, environment = _identity()
+    report = {
+        'schema_version': 1, 'mode': 'mock_baseline', 'project_id': None,
+        'source': source, 'environment': environment, 'artifacts': {}, 'checks': [],
+        'costs': {'external_api_calls': 0, 'estimated_usd': 0, 'actual_usd': None,
+                  'billing_status': 'not_applicable'},
+        'metrics': {'elapsed_sec': 0, 'video_generation_calls': 0, 'required_clicks': None,
+                    'measurement_scope': 'legacy_script', 'blocked_http_attempts': 0},
+        'manual_steps': [
+            {'action': 'Launch legacy baseline script', 'scope': 'operator'},
+            {'action': 'Watch/listen to all exports', 'status': 'pending'},
+        ],
+        'not_verified': [*evidence.NOT_VERIFIED, 'human_viewing', 'guided_browser_clicks'],
+    }
+
+    def block_http(*args, **kwargs):
+        report['metrics']['blocked_http_attempts'] += 1
+        raise AssertionError('HTTP disabled during local acceptance')
+
+    async def block_async_http(*args, **kwargs):
+        block_http()
+
+    stage = 'preflight'
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(core, 'HOME', root / 'studio-data'))
+            stack.enter_context(patch.object(core, 'load_dotenv', return_value=False))
+            stack.enter_context(patch.object(httpx.Client, 'send', block_http))
+            stack.enter_context(patch.object(httpx.AsyncClient, 'send', block_async_http))
+            generated = stack.enter_context(patch.object(core, 'mock_generate', wraps=core.mock_generate))
+            try:
+                if environment['ffmpeg'] is None or environment['ffprobe'] is None:
+                    raise RuntimeError('ffmpeg and ffprobe are required')
+                filters = _command(['ffmpeg', '-hide_banner', '-filters']).stdout
+                _check(report, 'subtitle_filter_available', ' subtitles ' in filters,
+                       'FFmpeg subtitles filter must be available')
+                stage = 'generation'
+                pid = core.create('M0 offline six-shot media baseline', 60, 'mock', 0)
+                report['project_id'] = pid
+                core.plan(pid, 10)
+                core.generate(pid)
+                timeline.sync(pid)
+                items = timeline.timeline(pid)
+                _check(report, 'six_selected_shots', len(items) == 6
+                       and all(item['selected'] for item in items), {'count': len(items)})
+                report['artifacts']['source_videos'] = [
+                    dict(_video(root, Path(item['selected']['file'])),
+                         seq=item['seq'], asset_id=item['selected']['id']) for item in items
+                ]
+                stage = 'audio_and_subtitles'
+                narration, music = root / 'narration.wav', root / 'music.wav'
+                for path, frequency in ((narration, 440), (music, 220)):
+                    _command(['ffmpeg', '-v', 'error', '-n', '-f', 'lavfi', '-i',
+                              f'sine=frequency={frequency}:duration=60:sample_rate=48000',
+                              '-ac', '2', '-c:a', 'pcm_s16le', str(path)])
+                report['artifacts']['audio_inputs'] = {
+                    'kind': 'synthetic_placeholder', 'narration': _file(root, narration),
+                    'music': _file(root, music),
+                }
+                subtitles = root / 'baseline.srt'
+                _captions(subtitles)
+                sound.configure(pid, narration=str(narration), music=str(music),
+                                subtitles=str(subtitles))
+                stage = 'baseline_export'
+                _render(root, pid, report, 'baseline', subtitles)
+                _check(report, 'no_external_http',
+                       report['metrics']['blocked_http_attempts'] == 0,
+                       {'blocked_attempts': report['metrics']['blocked_http_attempts']})
+            finally:
+                report['metrics']['video_generation_calls'] = generated.call_count
+    except Exception as exc:
+        report['checks'].append({'id': 'execution', 'status': 'failed',
+                                 'evidence': {'stage': stage, 'error_type': type(exc).__name__}})
+        report['metrics']['elapsed_sec'] = round(time.monotonic() - started, 3)
+        evidence.write_bundle_report(root, report)
+        raise
+    report['checks'].append({'id': 'human_viewing', 'status': 'not_verified',
+                             'evidence': 'Complete viewing/listening by a person required'})
+    report['metrics']['elapsed_sec'] = round(time.monotonic() - started, 3)
+    return evidence.write_bundle_report(root, report)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output-root', type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        report = run_baseline(args.output_root)
+    except Exception as exc:
+        print(f'Acceptance failed ({type(exc).__name__}); inspect the output directory.', file=sys.stderr)
+        return 1
+    print(report)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
