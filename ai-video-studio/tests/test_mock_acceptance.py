@@ -5,12 +5,14 @@ import importlib.util
 import json
 import re
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
 
-from studio import core
+from studio import core, sound
 
 
 def load_runner():
@@ -27,10 +29,27 @@ def baseline_bundle(tmp_path_factory):
     runner = load_runner()
     root = tmp_path_factory.mktemp('acceptance-parent') / 'bundle'
     home, send = core.HOME, httpx.Client.send
-    report_path = runner.run_baseline(root)
+    observations = []
+    real_export = sound.export
+    with ExitStack() as stack:
+        generated = stack.enter_context(patch.object(core, 'mock_generate', wraps=core.mock_generate))
+        for provider in set(core.PROVIDERS.values()):
+            for name in ('submit', 'submit_i2v'):
+                if hasattr(provider, name):
+                    stack.enter_context(patch.object(provider, name, side_effect=AssertionError('Paid submission')))
+
+        def observe_export(*args, **kwargs):
+            result = real_export(*args, **kwargs)
+            observations.append(generated.call_count)
+            return result
+
+        stack.enter_context(patch.object(sound, 'export', observe_export))
+        report_path = runner.run_baseline(root)
     assert core.HOME == home
     assert httpx.Client.send is send
-    return root, json.loads(report_path.read_text())
+    report = json.loads(report_path.read_text())
+    report['test_generation_calls_at_exports'] = observations
+    return root, report
 
 
 def test_existing_output_root_is_rejected(tmp_path):
@@ -126,3 +145,38 @@ def test_missing_tools_leave_failure_evidence(tmp_path, monkeypatch):
     assert report['environment']['errors']
     assert any(c['status'] == 'failed' for c in report['checks'])
     assert core.HOME == home
+
+
+def test_local_edits_reuse_other_video_assets(baseline_bundle):
+    root, report = baseline_bundle
+    artifacts = report['artifacts']
+    assert 'shot_replacement' in artifacts, 'local replacement scenario not implemented'
+    assert 'subtitle_revision' in artifacts, 'subtitle revision scenario not implemented'
+    original, replaced, revised = (artifacts[n] for n in ('baseline', 'shot_replacement', 'subtitle_revision'))
+    assert report['test_generation_calls_at_exports'] == [6, 6, 6]
+    assert len({r['video']['path'] for r in (original, replaced, revised)}) == 3
+    assert all((root / r['video']['path']).is_file() for r in (original, replaced, revised))
+    assert [s['seq'] for s in original['selections']] == [1, 2, 3, 4, 5, 6]
+    changed = [a['seq'] for a, b in zip(original['selections'], replaced['selections'])
+               if a['asset_id'] != b['asset_id']]
+    assert changed == [3]
+    assert revised['selections'] == replaced['selections']
+    for source in artifacts['source_videos']:
+        assert hashlib.sha256((root / source['path']).read_bytes()).hexdigest() == source['sha256']
+    assert replaced['subtitles']['sha256'] != revised['subtitles']['sha256']
+    for key in ('narration', 'music', 'ambience', 'narration_gain', 'music_gain',
+                'ambience_gain', 'fade_seconds'):
+        assert revised['soundtrack'][key] == replaced['soundtrack'][key]
+    hashes = []
+    for version in (replaced, revised):
+        pcm = subprocess.check_output([
+            'ffmpeg', '-v', 'error', '-i', str(root / version['video']['path']),
+            '-map', '0:a:0', '-ac', '2', '-ar', '48000', '-f', 's16le', '-',
+        ])
+        hashes.append(hashlib.sha256(pcm).hexdigest())
+        assert version['audio']['mean_volume_db'] > -60
+    assert hashes[0] == hashes[1]
+    checks = {c['id']: c['status'] for c in report['checks']}
+    for name in ('source_assets_unchanged', 'single_shot_replaced',
+                 'subtitle_edit_video_generation_calls_zero'):
+        assert checks[name] == 'passed'

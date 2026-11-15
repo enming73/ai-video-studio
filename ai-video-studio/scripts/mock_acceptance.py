@@ -81,7 +81,12 @@ def _audio_evidence(path):
         raise RuntimeError('No audio volume measurement')
     value = float(match.group(1))
     # JSON has no infinity; None means silence/unavailable, never a pass.
-    return {'mean_volume_db': value if value != float('-inf') else None}
+    pcm_hash = _command([
+        'ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:a:0', '-ac', '2',
+        '-ar', '48000', '-c:a', 'pcm_s16le', '-f', 'hash', '-hash', 'sha256', '-',
+    ]).stdout.strip().removeprefix('SHA256=')
+    return {'mean_volume_db': value if value != float('-inf') else None,
+            'pcm_sha256': pcm_hash, 'pcm_format': 's16le/48000/stereo'}
 
 
 def _render(root, pid, report, name, subtitles):
@@ -186,6 +191,65 @@ def run_baseline(output_root: Path) -> Path:
                                 subtitles=str(subtitles))
                 stage = 'baseline_export'
                 _render(root, pid, report, 'baseline', subtitles)
+                stage = 'shot_replacement'
+                before_edits = generated.call_count
+                replacement = root / 'replacement.mp4'
+                _command([
+                    'ffmpeg', '-v', 'error', '-n', '-f', 'lavfi', '-i',
+                    'color=c=yellow:s=640x360:r=24:d=10',
+                    '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(replacement),
+                ])
+                asset_id = timeline.import_asset(pid, 3, str(replacement),
+                                                 source='acceptance-replacement')
+                timeline.select(pid, 3, asset_id)
+                report['artifacts']['replacement_input'] = _video(root, replacement)
+                _render(root, pid, report, 'shot_replacement', subtitles)
+                initial = report['artifacts']['baseline']['selections']
+                replaced = report['artifacts']['shot_replacement']['selections']
+                changed = [a['seq'] for a, b in zip(initial, replaced)
+                           if a['asset_id'] != b['asset_id']]
+                _check(report, 'single_shot_replaced',
+                       len(initial) == len(replaced) == 6 and changed == [3],
+                       {'changed_shots': changed})
+                _check(report, 'replacement_video_generation_calls_zero',
+                       generated.call_count == before_edits,
+                       {'calls': generated.call_count - before_edits})
+                stage = 'subtitle_revision'
+                before_subtitles = generated.call_count
+                revised_subtitles = root / 'revised.srt'
+                _captions(revised_subtitles, revised=True)
+                config = sound.config(pid)
+                # configure replaces the full config. Preserve all audio settings.
+                config.pop('project_id')
+                config['subtitles'] = str(revised_subtitles)
+                sound.configure(pid, **config)
+                _render(root, pid, report, 'subtitle_revision', revised_subtitles)
+                revised = report['artifacts']['subtitle_revision']
+                replaced_export = report['artifacts']['shot_replacement']
+                _check(report, 'subtitle_edit_video_generation_calls_zero',
+                       generated.call_count == before_subtitles,
+                       {'calls': generated.call_count - before_subtitles})
+                _check(report, 'subtitle_edit_preserves_selections',
+                       revised['selections'] == replaced,
+                       {'selections': revised['selections']})
+                _check(report, 'subtitle_edit_preserves_audio',
+                       revised['audio']['pcm_sha256'] == replaced_export['audio']['pcm_sha256']
+                       and all(revised['soundtrack'][k] == v for k, v in
+                               replaced_export['soundtrack'].items() if k != 'subtitles'),
+                       {'before': replaced_export['audio'], 'after': revised['audio']})
+                _check(report, 'subtitle_version_changed',
+                       revised['subtitles']['sha256'] != replaced_export['subtitles']['sha256'],
+                       {'before': replaced_export['subtitles'], 'after': revised['subtitles']})
+                stage = 'preservation'
+                unchanged = all(evidence.file_hash(root / item['path']) == item['sha256']
+                                for item in report['artifacts']['source_videos'])
+                _check(report, 'source_assets_unchanged', unchanged,
+                       {'checked_source_assets': len(report['artifacts']['source_videos'])})
+                for name in ('baseline', 'shot_replacement', 'subtitle_revision'):
+                    item = report['artifacts'][name]['video']
+                    _check(report, name + '_preserved',
+                           evidence.file_hash(root / item['path']) == item['sha256'],
+                           {'path': item['path'], 'sha256': item['sha256']})
                 _check(report, 'no_external_http',
                        report['metrics']['blocked_http_attempts'] == 0,
                        {'blocked_attempts': report['metrics']['blocked_http_attempts']})
