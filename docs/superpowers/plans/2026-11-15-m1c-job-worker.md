@@ -8,7 +8,7 @@
 
 **Spec:** [M1 可靠性设计](../specs/2026-11-15-m1-reliability-design.md) §3–§6；[Roadmap M1](../../../ROADMAP.md#m1--可恢复任务provider-契约与统一费用)。
 
-**Status:** 计划待批准；所有复选框未实施。仅覆盖 M1-C。
+**Status:** 已完成并待复审。仅覆盖 M1-C。
 
 ## Global Constraints
 
@@ -75,15 +75,15 @@
 
 状态转换校验集中在 `_set_status`；所有写操作 `BEGIN IMMEDIATE`。
 
-- [ ] 写 `test_create_is_idempotent_and_replays_same_job`：同 key 两次返回同一 id，行数 1。
-- [ ] 写 `test_same_key_different_payload_is_rejected`。
-- [ ] 写 `test_create_requires_open_run_from_same_project`：无 run、已关闭、跨项目 run 均抛 `ValueError`。
-- [ ] 写 `test_pause_resume_cancel_transitions`：非法转换抛错；暂停 RUNNING 只设置 flag 不改状态；取消 RUNNING 不把状态改成 CANCELLED，且事件提醒远程可能继续。
-- [ ] 写 `test_list_filters_by_status_and_project`。
-- [ ] 写 `test_set_status_records_output_and_block_reason`。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_jobs.py -q`，确认因接口缺失失败。
-- [ ] 实现 `jobs.py`；事件写入不吞异常。
-- [ ] 重跑至通过；提交：`feat: add persistent job lifecycle`。
+- [x] 写 `test_create_is_idempotent_and_replays_same_job`：同 key 两次返回同一 id，行数 1。
+- [x] 写 `test_same_key_different_payload_is_rejected`。
+- [x] 写 `test_create_requires_open_run_from_same_project`：无 run、已关闭、跨项目 run 均抛 `ValueError`。
+- [x] 写 `test_pause_resume_cancel_transitions`：非法转换抛错；暂停 RUNNING 只设置 flag 不改状态；取消 RUNNING 不把状态改成 CANCELLED，且事件提醒远程可能继续。
+- [x] 写 `test_list_filters_by_status_and_project`。
+- [x] 写 `test_set_status_records_output_and_block_reason`。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_jobs.py -q`，确认因接口缺失失败。
+- [x] 实现 `jobs.py`；事件写入不吞异常。
+- [x] 重跑至通过；提交：`feat: add persistent job lifecycle`。
 
 ## Task 2：Attempt 状态机与原子提交意图
 
@@ -108,14 +108,14 @@ SUBMITTED/POLLING/DOWNLOADING/VALIDATING → UNKNOWN_REMOTE_STATE | FAILED_FINAL
 任意非终态 → ABANDONED
 ```
 
-- [ ] 写 `test_attempt_numbers_and_idempotency_key_are_unique`。
-- [ ] 写 `test_duplicate_active_fingerprint_reuses_attempt`：并发创建同输入只得到一行。
-- [ ] 写 `test_prepare_submission_is_atomic`：预算不足时 attempt 不存在或不处于 SUBMITTING，且无费用行。
-- [ ] 写 `test_prepare_submission_reserves_and_sets_submitting`：费用行与状态同时可见。
-- [ ] 写 `test_illegal_transition_is_rejected`：如 PLANNED→COMPLETED。
-- [ ] 写 `test_unknown_submission_cannot_be_retried_implicitly`：`mark_unknown` 后再 `prepare_submission` 抛错。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: add atomic attempt state machine`。
+- [x] 写 `test_attempt_numbers_and_idempotency_key_are_unique`。
+- [x] 写 `test_duplicate_active_fingerprint_reuses_attempt`：并发创建同输入只得到一行。
+- [x] 写 `test_prepare_submission_is_atomic`：预算不足时 attempt 不存在或不处于 SUBMITTING，且无费用行。
+- [x] 写 `test_prepare_submission_reserves_and_sets_submitting`：费用行与状态同时可见。
+- [x] 写 `test_illegal_transition_is_rejected`：如 PLANNED→COMPLETED。
+- [x] 写 `test_unknown_submission_cannot_be_retried_implicitly`：`mark_unknown` 后再 `prepare_submission` 抛错。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: add atomic attempt state machine`。
 
 ## Task 3：租约、恢复判定与双 Worker 防重
 
@@ -137,15 +137,15 @@ SUBMITTED/POLLING/DOWNLOADING/VALIDATING → UNKNOWN_REMOTE_STATE | FAILED_FINAL
   - `FAILED_RETRYABLE` 且 attempt_no < max_attempts → `execute`；否则 `fail`。
   - `FAILED_FINAL/ABANDONED` → `fail`。
 
-- [ ] 写 `test_claim_marks_running_with_lease`。
-- [ ] 写 `test_two_workers_claim_one_job`：8 线程并发 claim，同一 Job 只有一个 owner。
-- [ ] 写 `test_expired_lease_can_be_reclaimed`：租约过期后另一 owner 可领取，未过期不能。
-- [ ] 写 `test_heartbeat_extends_only_for_owner`。
-- [ ] 写 `test_recovery_blocks_submitting_without_remote`：不调用任何 Provider 提交。
-- [ ] 写 `test_recovery_resumes_remote_job_without_resubmit`。
-- [ ] 写 `test_recovery_retries_only_retryable_failure_below_limit`。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: add worker leases and recovery decisions`。
+- [x] 写 `test_claim_marks_running_with_lease`。
+- [x] 写 `test_two_workers_claim_one_job`：8 线程并发 claim，同一 Job 只有一个 owner。
+- [x] 写 `test_expired_lease_can_be_reclaimed`：租约过期后另一 owner 可领取，未过期不能。
+- [x] 写 `test_heartbeat_extends_only_for_owner`。
+- [x] 写 `test_recovery_blocks_submitting_without_remote`：不调用任何 Provider 提交。
+- [x] 写 `test_recovery_resumes_remote_job_without_resubmit`。
+- [x] 写 `test_recovery_retries_only_retryable_failure_below_limit`。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: add worker leases and recovery decisions`。
 
 ## Task 4：Worker 循环、心跳与处理器注册
 
@@ -168,14 +168,14 @@ SUBMITTED/POLLING/DOWNLOADING/VALIDATING → UNKNOWN_REMOTE_STATE | FAILED_FINAL
 - CLI `studio worker [--owner] [--once]`；`--once` 处理一个任务后退出。
 - `studio/handlers/__init__.py` 提供 `register_all()`；Task 5 在其中注册 `video`。未注册 kind → Job `FAILED/invalid_request`。
 
-- [ ] 写 `test_worker_executes_registered_handler_and_succeeds`。
-- [ ] 写 `test_worker_blocks_unknown_recovery_without_calling_handler`。
-- [ ] 写 `test_worker_marks_failed_on_non_provider_exception`。
-- [ ] 写 `test_worker_heartbeat_runs_during_slow_handler`：handler 睡眠超过 heartbeat_seconds，租约持续有效。
-- [ ] 写 `test_worker_respects_pause_and_picks_next_job`：PAUSED 不被领取；运行中 pause 在检查点转为 PAUSED；cancel 在检查点转为 CANCELLED 并保留远程提醒。
-- [ ] 写 `test_worker_cli_once`：subprocess 运行 `studio worker --once`，退出码 0。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: add persistent worker loop with heartbeat`。
+- [x] 写 `test_worker_executes_registered_handler_and_succeeds`。
+- [x] 写 `test_worker_blocks_unknown_recovery_without_calling_handler`。
+- [x] 写 `test_worker_marks_failed_on_non_provider_exception`。
+- [x] 写 `test_worker_heartbeat_runs_during_slow_handler`：handler 睡眠超过 heartbeat_seconds，租约持续有效。
+- [x] 写 `test_worker_respects_pause_and_picks_next_job`：PAUSED 不被领取；运行中 pause 在检查点转为 PAUSED；cancel 在检查点转为 CANCELLED 并保留远程提醒。
+- [x] 写 `test_worker_cli_once`：subprocess 运行 `studio worker --once`，退出码 0。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: add persistent worker loop with heartbeat`。
 
 ## Task 5：视频处理器试点（提交/轮询/下载）
 
@@ -195,14 +195,14 @@ SUBMITTED/POLLING/DOWNLOADING/VALIDATING → UNKNOWN_REMOTE_STATE | FAILED_FINAL
 - 下载/校验失败：`FAILED_FINAL` 或 `BLOCKED/download_failed`，绝不重新生成。
 - 取消：轮询间观察 `jobs.cancel_requested`，停止本地后续并保留远程 ID。
 
-- [ ] 写 `test_video_handler_submits_polls_and_downloads`：MockTransport/fake provider；断言费用 reserved、attempt COMPLETED、Job SUCCEEDED。
-- [ ] 写 `test_submit_timeout_marks_unknown_and_blocks`：provider 抛 `unknown_remote/maybe_sent`。
-- [ ] 写 `test_auth_error_blocks_without_retry`。
-- [ ] 写 `test_download_failure_does_not_resubmit`：下载抛错，提交调用次数仍为 1。
-- [ ] 写 `test_resume_uses_existing_remote_and_never_submits`。
-- [ ] 写 `test_missing_price_blocks_pricing_missing`。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: add video job handler pilot`。
+- [x] 写 `test_video_handler_submits_polls_and_downloads`：MockTransport/fake provider；断言费用 reserved、attempt COMPLETED、Job SUCCEEDED。
+- [x] 写 `test_submit_timeout_marks_unknown_and_blocks`：provider 抛 `unknown_remote/maybe_sent`。
+- [x] 写 `test_auth_error_blocks_without_retry`。
+- [x] 写 `test_download_failure_does_not_resubmit`：下载抛错，提交调用次数仍为 1。
+- [x] 写 `test_resume_uses_existing_remote_and_never_submits`。
+- [x] 写 `test_missing_price_blocks_pricing_missing`。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: add video job handler pilot`。
 
 ## Task 6：真实进程中断恢复与 CLI 回归
 
@@ -214,13 +214,13 @@ SUBMITTED/POLLING/DOWNLOADING/VALIDATING → UNKNOWN_REMOTE_STATE | FAILED_FINAL
 - 父测试等待 marker → `SIGKILL` 子进程 → 用新的 fake provider（提交计数）调用 `worker.run_once` → 断言 Job `BLOCKED`、attempt `UNKNOWN_REMOTE_STATE`、提交计数 0。
 - CLI `studio jobs PROJECT_ID`、`studio job JOB_ID`、`studio pause/resume/cancel JOB_ID` 只读/控制命令；输出状态、attempts、费用摘要。
 
-- [ ] 写 `test_killed_submitting_job_is_not_resubmitted`：真实 `SIGKILL`，重启后不提交、状态可查。
-- [ ] 写 `test_new_worker_does_not_duplicate_completed_download`：模拟已下载文件，恢复只校验不重新下载/提交。
-- [ ] 写 `test_cli_jobs_and_controls`：`--once`、jobs 列表、pause/resume/cancel 输出可解析。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_worker_recovery.py -q`。
-- [ ] 运行完整 Studio 286 项与 VBench 8 项。
-- [ ] 更新 `README` 或 `docs/`：Worker 启动方式、暂停/取消语义、未知状态需人工核对。
-- [ ] 提交：`feat: verify worker crash recovery`。
+- [x] 写 `test_killed_submitting_job_is_not_resubmitted`：真实 `SIGKILL`，重启后不提交、状态可查。
+- [x] 写 `test_new_worker_does_not_duplicate_completed_download`：模拟已下载文件，恢复只校验不重新下载/提交。
+- [x] 写 `test_cli_jobs_and_controls`：`--once`、jobs 列表、pause/resume/cancel 输出可解析。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_worker_recovery.py -q`。
+- [x] 运行完整 Studio 286 项与 VBench 8 项。
+- [x] 更新 `README` 或 `docs/`：Worker 启动方式、暂停/取消语义、未知状态需人工核对。
+- [x] 提交：`feat: verify worker crash recovery`。
 
 ## 自检结论与后续边界
 

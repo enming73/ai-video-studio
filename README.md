@@ -262,6 +262,23 @@ provider's final bill. Job status is held in memory and is lost on API restart;
 underlying submission state remains in SQLite. Never blindly resubmit an
 ambiguous submission. See [the v0.9.3 guide](README-v0.9.3.md).
 
+## Persistent job worker
+
+```bash
+cd ai-video-studio
+uv run studio worker --once          # process one queued job and exit
+uv run studio worker                 # run until interrupted
+uv run studio jobs PROJECT_ID
+uv run studio job JOB_ID
+uv run studio pause JOB_ID
+uv run studio resume JOB_ID
+uv run studio cancel JOB_ID
+```
+
+Jobs and attempts are stored in SQLite; the worker claims them with a lease and heartbeats until the handler finishes. A lease can be reclaimed after expiry, but an attempt that may already have reached a provider (`SUBMITTING` without a remote id) is blocked as unknown and is never submitted again automatically. Pausing a running job records a request and stops at the next checkpoint; it does not claim that the remote task stopped. Cancelling has the same limitation for already submitted remote work.
+
+M1-C includes a video handler pilot but does not yet route the existing CLI/UI paid commands through it; that integration is M1-D.
+
 ## Tests
 ```bash
 cd ai-video-studio && uv run --extra dev pytest -q

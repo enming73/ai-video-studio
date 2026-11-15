@@ -257,7 +257,7 @@ def test_connect_applies_migrations_to_new_database(tmp_path, monkeypatch):
     with core.connect() as db:
         versions = [row[0] for row in db.execute(
             'SELECT version FROM schema_migrations ORDER BY version')]
-    assert versions == [1, 2]
+    assert versions == [1, 2, 3]
 
 
 def test_connect_migrates_existing_database_once(tmp_path, monkeypatch):
@@ -270,7 +270,7 @@ def test_connect_migrates_existing_database_once(tmp_path, monkeypatch):
         migrations_count = db.execute(
             'SELECT COUNT(*) FROM schema_migrations').fetchone()[0]
     assert first == second == 1
-    assert migrations_count == 2
+    assert migrations_count == 3
 
 
 def test_connect_creates_backup_before_upgrading_existing_database(tmp_path, monkeypatch):

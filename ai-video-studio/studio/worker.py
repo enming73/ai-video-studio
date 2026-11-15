@@ -40,12 +40,12 @@ def register(kind: str, handler) -> None:
     HANDLERS[kind] = handler
 
 
-def _finish_blocked(job_id: str, detail: str) -> None:
+def _finish_blocked(job_id: str, detail: str, reason: str = 'unknown_remote') -> None:
     attempt = jobs.latest_attempt(job_id)
     if attempt and attempt['status'] == 'SUBMITTING':
         attempts.mark_unknown(attempt['id'], detail)
-    jobs.set_status(job_id, 'BLOCKED', block_reason='unknown_remote',
-                    error_class='unknown_remote', error_detail=detail)
+    jobs.set_status(job_id, 'BLOCKED', block_reason=reason,
+                    error_class=reason, error_detail=detail)
 
 
 def run_once(owner: str | None = None, *, lease_seconds: int = 60,
@@ -98,7 +98,8 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
         jobs.set_status(job_id, 'BLOCKED', block_reason=blocked.reason)
     except ProviderError as exc:
         if exc.kind in ('unknown_remote', 'auth'):
-            _finish_blocked(job_id, str(exc))
+            _finish_blocked(job_id, str(exc),
+                            'unknown_remote' if exc.kind == 'unknown_remote' else 'auth')
         else:
             jobs.set_status(job_id, 'FAILED', error_class=exc.kind,
                             error_detail=str(exc)[:1200])
