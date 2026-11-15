@@ -1,8 +1,8 @@
 # AI Video Studio — Project Handoff
 Date: 2026-11-15
-Status: Roadmap approved; M0 local acceptance tooling implemented in an isolated
-worktree. Automated checks pass; human viewing/listening and milestone sign-off
-remain pending. No paid testing was performed or authorized.
+Status: Roadmap approved; M0 local acceptance tooling implemented and accepted by
+the user on 2026-11-15 within its documented scope. No paid testing was performed
+or authorized. M1 has not started; its detailed design is the next proposed step.
 
 ## Goal
 Build a complete AI filmmaking studio: one-click complete draft → optional manual
@@ -95,8 +95,9 @@ For exact current commands/options always inspect `studio/cli.py` and version RE
 - Never claim browser/API end-to-end tests when only compile/ZIP tests ran.
 
 ## Current status and next steps
-The user approved the roadmap and authorized M0 in an isolated worktree.
-The next step is human M0 acceptance, followed by a separately scoped M1 plan,
+The user approved the roadmap and authorized M0 in an isolated worktree. M0 was
+accepted by the user on 2026-11-15 within its documented local-media scope.
+The next step is a separately scoped and reviewed M1 plan,
 not automatic continuation of historical release plans. The historical v0.9.5 ZIP
 was not user-verified; earlier verification claims are not a substitute for
 testing the current repository.

@@ -10,7 +10,7 @@
 
 **Spec:** [产品方向与交付约束](../specs/2026-11-15-studio-product-direction-design.md)；[ROADMAP M0](../../../ROADMAP.md#m0--建立可重复的现状验收基线)。
 
-**Status:** 用户已批准实施；Tasks 1–3 已验证，Task 4 的自动化与文档已交付，人工完整观看/试听与验收确认待完成。仅覆盖 M0，不实现一键编排、统一费用账本或 Worker。证据见 [M0 基线](../../acceptance/m0-baseline.md)。
+**Status:** 用户已批准实施；Tasks 1–3 已验证，Task 4 已完成；用户于 2026-11-15 确认 M0 验收，范围仅限本地 legacy 媒体链路。仅覆盖 M0，不实现一键编排、统一费用账本或 Worker。证据见 [M0 基线](../../acceptance/m0-baseline.md)。
 
 ## Global Constraints
 
@@ -127,11 +127,11 @@
 
 - [x] 从 `ai-video-studio/` 运行完整测试：`uv run --extra dev --extra web pytest -q`。
 - [x] 在尚不存在的新目录手工执行 `uv run python scripts/mock_acceptance.py --output-root /tmp/opencode/studio-m0-<unique-run-id>`；占位 ID 替换为本次唯一值，记录命令和退出码。
-- [ ] 阅读 report.json 并人工观看三版输出：记录字幕可见可读、替换镜头可见、音轨存在；合成音频仅验收管线，不评价旁白语义。（自动化已读取报告并完成媒体探测；完整观看/试听待人工完成）
+- [x] 阅读 report.json 并人工观看三版输出：记录字幕可见可读、替换镜头可见、音轨存在；合成音频仅验收管线，不评价旁白语义。（用户于 2026-11-15 确认；逐项观看记录未单独留存）
 - [x] 逐项核对开发流程的故障矩阵：填写已有具体测试路径/名称，或明确 `not_verified`；不得把异常模拟测试描述为真实进程重启。
 - [x] 单独建立 Guided 基线清单，按现有 UI/API 记录故事板、角色/空 cast、边界与镜头确认步骤及源码位置；如能执行本地 Mock 浏览器操作，记录实际点击/耗时和证据，否则填 `not_measured`。这份清单不与 legacy 脚本指标混算；M3 首次浏览器比较前必须补测仍缺少的 Guided 基线。
 - [x] 在基线文档记录 commit、dirty 状态、工具版本、耗时、产物规格、报告字段及缺口，明确本阶段是 legacy 手动素材流程而非自动 Guided/真实付费 E2E。
-- [x] 只有 M0 全部退出条件有证据且验收获确认后，更新为“已验收”；否则记录“待验收/阻塞”及原因。
+- [x] 只有 M0 全部退出条件有证据且验收获确认后，更新为“已验收”；否则记录“待验收/阻塞”及原因。（用户于 2026-11-15 确认）
 - [x] 评审后形成独立提交：`docs: record mock acceptance baseline and remaining gaps`。
 
 ## 自检结论与后续边界

@@ -13,8 +13,9 @@ export**. See [ROADMAP.md](ROADMAP.md) for the proposed milestones and acceptanc
 gates, and [the development workflow](docs/development-workflow.md) for the
 implementation and verification process. The roadmap is planning guidance, not a
 claim that automatic production is already implemented. The roadmap is approved;
-[M0 local acceptance tooling](docs/acceptance/m0-baseline.md) is implemented with
-automated evidence and pending human viewing/sign-off. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
+[M0 local acceptance tooling](docs/acceptance/m0-baseline.md) is implemented,
+automated evidence recorded and accepted by the user within its documented local
+legacy-media scope. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
 and verification limits.
 
 This repository contains Studio, VBench, and their shared provider core. The
