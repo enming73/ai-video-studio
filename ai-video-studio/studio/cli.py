@@ -325,3 +325,36 @@ def worker_cmd(owner: str = typer.Option(None, help='Stable worker owner id'),
         console.print_json(json.dumps({'job_id': job_id}, ensure_ascii=False))
     else:
         worker_module.run_forever(owner, poll)
+
+@app.command('jobs')
+def jobs_cmd(project_id: str):
+    """List persistent jobs for a project."""
+    from . import jobs
+    console.print_json(json.dumps(jobs.list_for_project(project_id), ensure_ascii=False))
+
+
+@app.command('job')
+def job_cmd(job_id: str):
+    """Show one persistent job, including attempts."""
+    from . import attempts, jobs
+    data = jobs.get(job_id)
+    data['attempts'] = attempts.list_for_job(job_id)
+    console.print_json(json.dumps(data, ensure_ascii=False))
+
+
+@app.command('pause')
+def pause_cmd(job_id: str):
+    from . import jobs
+    console.print_json(json.dumps(jobs.pause(job_id), ensure_ascii=False))
+
+
+@app.command('resume')
+def resume_cmd(job_id: str):
+    from . import jobs
+    console.print_json(json.dumps(jobs.resume(job_id), ensure_ascii=False))
+
+
+@app.command('cancel')
+def cancel_cmd(job_id: str):
+    from . import jobs
+    console.print_json(json.dumps(jobs.cancel(job_id), ensure_ascii=False))
