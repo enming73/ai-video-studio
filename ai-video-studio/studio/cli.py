@@ -311,3 +311,17 @@ def director_review_cmd(project_id: str, report_id: str,
         console.print_json(json.dumps(result,ensure_ascii=False))
     except (ValueError,RuntimeError) as exc:
         console.print(f'[red]{exc}[/red]'); raise typer.Exit(1)
+
+@app.command('worker')
+def worker_cmd(owner: str = typer.Option(None, help='Stable worker owner id'),
+               once: bool = typer.Option(False, help='Process at most one job and exit'),
+               poll: float = typer.Option(2.0, help='Idle sleep seconds')):
+    """Run the persistent job worker; no paid calls without an authorized job."""
+    from . import worker as worker_module
+    from .handlers import register_all
+    register_all()
+    if once:
+        job_id = worker_module.run_once(owner)
+        console.print_json(json.dumps({'job_id': job_id}, ensure_ascii=False))
+    else:
+        worker_module.run_forever(owner, poll)

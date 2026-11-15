@@ -1,10 +1,11 @@
 """Leases and recovery must never turn an unknown submission into a retry."""
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from studio import attempts, core, jobs, ledger
+from studio import attempts, core, jobs, ledger, worker
 
 
 @pytest.fixture
@@ -77,3 +78,99 @@ def test_recovery_retries_only_retryable_failure_below_limit(job):
     attempts.mark_failed(attempt['id'], 'FAILED_RETRYABLE', 'definite rejection')
     assert jobs.recovery_action(job['id'], max_attempts=2) == 'execute'
     assert jobs.recovery_action(job['id'], max_attempts=1) == 'fail'
+
+
+class Handler:
+    def __init__(self, result=None, error=None):
+        self.result = result or {'ok': True}
+        self.error = error
+        self.calls = 0
+
+    def execute(self, job, attempt_service, control):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+    def resume(self, job, attempt, control):
+        self.calls += 1
+        return self.result
+
+
+def test_worker_executes_registered_handler_and_succeeds(job):
+    handler = Handler({'file': '/tmp/x.mp4'})
+    worker.register('video', handler)
+    assert worker.run_once('w') == job['id']
+    assert handler.calls == 1
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'SUCCEEDED'
+    assert 'x.mp4' in saved['output_json']
+
+
+def test_worker_blocks_unknown_recovery_without_calling_handler(job):
+    _submitting(job)
+    handler = Handler()
+    worker.register('video', handler)
+    worker.run_once('w')
+    assert handler.calls == 0
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'BLOCKED'
+    assert saved['block_reason'] == 'unknown_remote'
+    assert jobs.latest_attempt(job['id'])['status'] == 'UNKNOWN_REMOTE_STATE'
+
+
+def test_worker_marks_failed_on_non_provider_exception(job):
+    worker.register('video', Handler(error=RuntimeError('boom')))
+    worker.run_once('w')
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'FAILED'
+    assert saved['error_class'] == 'RuntimeError'
+
+
+def test_worker_heartbeat_runs_during_slow_handler(job):
+    seen = {}
+
+    class Slow:
+        def execute(self, record, attempt_service, control):
+            seen['before'] = jobs.get(record['id'])['lease_expires']
+            time.sleep(0.3)
+            seen['after'] = jobs.get(record['id'])['lease_expires']
+            return {}
+
+    worker.register('video', Slow())
+    worker.run_once('w', lease_seconds=1, heartbeat_seconds=0.05)
+    assert seen['after'] > seen['before']
+    assert jobs.get(job['id'])['status'] == 'SUCCEEDED'
+
+
+def test_worker_respects_pause_and_picks_next_job(job):
+    paused = jobs.pause(job['id'])
+    assert paused['status'] == 'PAUSED'
+    second = jobs.create(job['project_id'], kind='video', payload={},
+                         request_key='req-2', run_id=job['run_id'])
+    handler = Handler()
+    worker.register('video', handler)
+    assert worker.run_once('w') == second['id']
+    assert jobs.get(job['id'])['status'] == 'PAUSED'
+
+
+def test_worker_pauses_at_checkpoint(job):
+    class Pausing:
+        def execute(self, record, attempt_service, control):
+            jobs.pause(record['id'])
+            control.checkpoint(record['id'])
+            return {'never': True}
+
+    worker.register('video', Pausing())
+    worker.run_once('w')
+    saved = jobs.get(job['id'])
+    assert saved['status'] == 'PAUSED'
+    assert saved['output_json'] is None
+
+
+def test_worker_cli_once(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    result = CliRunner().invoke(app, ['worker', '--once'])
+    assert result.exit_code == 0
