@@ -10,7 +10,7 @@
 
 **Spec:** [M1 可靠性设计](../specs/2026-11-15-m1-reliability-design.md#5-provider-契约)；[Roadmap M1](../../../ROADMAP.md#m1--可恢复任务provider-契约与统一费用)。
 
-**Status:** 计划待批准；所有复选框未实施。仅覆盖 M1-B，不实现 Job/Worker、API 或付费入口迁移。
+**Status:** 已完成并待复审。仅覆盖 M1-B，不实现 Job/Worker、API 或付费入口迁移。
 
 ## Global Constraints
 
@@ -112,16 +112,16 @@ class ProviderError(RuntimeError):
 
 错误文本最多保留 1200 字符的响应体；绝不包含请求头或密钥。`Retry-After` 只接受非负整数秒，HTTP 日期形式忽略。
 
-- [ ] 写 `test_http_status_classification`：参数化 401/403/400/404/409/422/429/500/503，断言 kind 与 submission_state（POST 的 404/409 为 unknown_remote/maybe_sent，GET 为 invalid_request/not_sent）。
-- [ ] 写 `test_rate_limit_parses_retry_after`：`Retry-After: 12` → `retry_after_sec=12`；非法值 → `None`。
-- [ ] 写 `test_timeout_on_post_is_unknown_remote`：MockTransport 抛 `httpx.ConnectTimeout`；POST 为 `unknown_remote` + `maybe_sent`，GET 为 `not_sent`。
-- [ ] 写 `test_non_json_post_is_unknown_remote`：200 返回文本；kind、submission_state 正确。
-- [ ] 写 `test_error_text_is_truncated_and_has_no_headers`：10000 字符响应体被截断，错误文本不含 `Authorization`/测试密钥。
-- [ ] 写 `test_money_conversion_in_contract`：`to_micro('0.1') == 100000`，拒绝 bool/NaN/负数。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_provider_contract.py -q`，确认因接口缺失失败。
-- [ ] 实现契约与 `request_json` 分类；所有直接抛出的适配器错误也补上 kind（缺密钥=`auth`，缺 task_id=`unknown_remote`）。
-- [ ] 重跑定向测试至通过。
-- [ ] 提交：`feat: classify provider errors and define contract`。
+- [x] 写 `test_http_status_classification`：参数化 401/403/400/404/409/422/429/500/503，断言 kind 与 submission_state（POST 的 404/409 为 unknown_remote/maybe_sent，GET 为 invalid_request/not_sent）。
+- [x] 写 `test_rate_limit_parses_retry_after`：`Retry-After: 12` → `retry_after_sec=12`；非法值 → `None`。
+- [x] 写 `test_timeout_on_post_is_unknown_remote`：MockTransport 抛 `httpx.ConnectTimeout`；POST 为 `unknown_remote` + `maybe_sent`，GET 为 `not_sent`。
+- [x] 写 `test_non_json_post_is_unknown_remote`：200 返回文本；kind、submission_state 正确。
+- [x] 写 `test_error_text_is_truncated_and_has_no_headers`：10000 字符响应体被截断，错误文本不含 `Authorization`/测试密钥。
+- [x] 写 `test_money_conversion_in_contract`：`to_micro('0.1') == 100000`，拒绝 bool/NaN/负数。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_provider_contract.py -q`，确认因接口缺失失败。
+- [x] 实现契约与 `request_json` 分类；所有直接抛出的适配器错误也补上 kind（缺密钥=`auth`，缺 task_id=`unknown_remote`）。
+- [x] 重跑定向测试至通过。
+- [x] 提交：`feat: classify provider errors and define contract`。
 
 ## Task 2：适配器实现能力、费用、提交与查询
 
@@ -150,18 +150,18 @@ T2V 能力的 `supports_first_frame`/`supports_last_frame` 为 False；I2V 能�
 
 `submit_video` 校验时长在能力内，不支持抛 `ProviderError(kind='invalid_request', submission_state='not_sent')`；调用旧 `submit`/`submit_i2v` 并返回 `RemoteJob`。`status` 把旧 `Poll` 映射为 `RemoteStatus`。
 
-- [ ] 写 `test_provider_capabilities_contract`：三家时长、标志、source 正确；Wan 无 I2V；未知模型返回 `None`。
-- [ ] 写 `test_estimate_cost_uses_verified_rate`：monkeypatch `MINIMAX_USD_PER_SECOND=0.1`，5 秒 → `500000` 微美元，pricing_version/source 正确。
-- [ ] 写 `test_missing_rate_returns_none_estimate`。
-- [ ] 写 `test_invalid_rate_is_rejected`：`-1`、`abc`、`200`。
-- [ ] 写 `test_submit_video_rejects_unsupported_duration`。
-- [ ] 写 `test_submit_video_wraps_legacy_result`：MockTransport 返回 `task_id`，断言 `RemoteJob(provider='minimax', remote_id=...)`。
-- [ ] 写 `test_status_maps_legacy_poll`：running/succeeded/failed 映射。
-- [ ] 写 `test_legacy_submit_and_poll_remain_available`：现有旧调用仍工作。
-- [ ] 运行定向测试确认失败。
-- [ ] 实现适配器新接口；不改变现有请求体/端点。
-- [ ] 重跑至通过。
-- [ ] 提交：`feat: expose provider capabilities costs and status`。
+- [x] 写 `test_provider_capabilities_contract`：三家时长、标志、source 正确；Wan 无 I2V；未知模型返回 `None`。
+- [x] 写 `test_estimate_cost_uses_verified_rate`：monkeypatch `MINIMAX_USD_PER_SECOND=0.1`，5 秒 → `500000` 微美元，pricing_version/source 正确。
+- [x] 写 `test_missing_rate_returns_none_estimate`。
+- [x] 写 `test_invalid_rate_is_rejected`：`-1`、`abc`、`200`。
+- [x] 写 `test_submit_video_rejects_unsupported_duration`。
+- [x] 写 `test_submit_video_wraps_legacy_result`：MockTransport 返回 `task_id`，断言 `RemoteJob(provider='minimax', remote_id=...)`。
+- [x] 写 `test_status_maps_legacy_poll`：running/succeeded/failed 映射。
+- [x] 写 `test_legacy_submit_and_poll_remain_available`：现有旧调用仍工作。
+- [x] 运行定向测试确认失败。
+- [x] 实现适配器新接口；不改变现有请求体/端点。
+- [x] 重跑至通过。
+- [x] 提交：`feat: expose provider capabilities costs and status`。
 
 ## Task 3：Studio 能力表委托 Provider
 
@@ -179,21 +179,21 @@ T2V 能力的 `supports_first_frame`/`supports_last_frame` 为 False；I2V 能�
 - 旧测试期望的时长列表、`first_last_frame`、`verified` 必须完全一致。
 - `feasible`、`validate_durations`、`_check` 不变。
 
-- [ ] 写 `test_studio_capabilities_match_provider_contract`：MiniMax/Flux/Wan 的 T2V 与 I2V 字典与契约一致。
-- [ ] 写 `test_invalid_wan_configuration_is_unverified_not_crash`：`WAN_BASE_URL` 非法时 `capabilities('wan', ...)` 返回 verified=False。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_provider_capabilities.py tests/test_guided_i2v.py -q`，确认委托后行为变化。
-- [ ] 实现委托并删除 `_CAPABILITIES`/`_I2V` 中真实 Provider 的重复常量。
-- [ ] 重跑定向测试至通过。
-- [ ] 提交：`refactor: delegate studio capabilities to providers`。
+- [x] 写 `test_studio_capabilities_match_provider_contract`：MiniMax/Flux/Wan 的 T2V 与 I2V 字典与契约一致。
+- [x] 写 `test_invalid_wan_configuration_is_unverified_not_crash`：`WAN_BASE_URL` 非法时 `capabilities('wan', ...)` 返回 verified=False。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_provider_capabilities.py tests/test_guided_i2v.py -q`，确认委托后行为变化。
+- [x] 实现委托并删除 `_CAPABILITIES`/`_I2V` 中真实 Provider 的重复常量。
+- [x] 重跑定向测试至通过。
+- [x] 提交：`refactor: delegate studio capabilities to providers`。
 
 ## Task 4：回归与契约文档
 
 **Files:** 修改 `docs/superpowers/specs/2026-11-15-m1-reliability-design.md`（记录命名差异）；必要时更新 `README.md` 的 Provider 说明。
 
-- [ ] 运行 `uv run --extra dev --extra web pytest -q`；要求全部通过，仅保留既有 Starlette 警告。
-- [ ] 运行 `uv run --extra test pytest -q`（在 `vbench/`）；要求现有测试通过。
-- [ ] 在设计中记录：新方法名为 `submit_video`/`status`（避免与旧 `submit`/`poll` 冲突）；`Capability.source` 与 `VideoRequest.model` 为附加字段。
-- [ ] 提交：`docs: record provider contract naming and verification`。
+- [x] 运行 `uv run --extra dev --extra web pytest -q`；要求全部通过，仅保留既有 Starlette 警告。
+- [x] 运行 `uv run --extra test pytest -q`（在 `vbench/`）；要求现有测试通过。
+- [x] 在设计中记录：新方法名为 `submit_video`/`status`（避免与旧 `submit`/`poll` 冲突）；`Capability.source` 与 `VideoRequest.model` 为附加字段。
+- [x] 提交：`docs: record provider contract naming and verification`。
 
 ## 自检结论与后续边界
 

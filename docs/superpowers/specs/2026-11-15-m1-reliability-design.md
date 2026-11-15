@@ -323,6 +323,18 @@ class Provider(Protocol):
 - Flux app-level queue 路径、MiniMax 4–15 秒、Flux 5–20 秒等差异留在适配器。
 - 错误解析保留 `Retry-After`，但不得把凭据或完整响应体写入持久事件。
 
+### 5.1 M1-B 实现命名（2026-11-15）
+
+为避免与现有兼容方法签名冲突，统一方法名改为：
+
+- `submit_video(request, idempotency_key)`：新提交入口；旧 `submit`/`submit_i2v` 保留。
+- `status(job, *, model=None)`：新查询入口；旧 `poll` 保留。
+- `Capability.source` 记录能力来源文档。
+- `VideoRequest.model` 标识具体模型；为空时适配器使用默认模型。
+- 404/409 在 POST 上归为 `unknown_remote`/`maybe_sent`（可能已到达），在 GET 上归为 `invalid_request`/`not_sent`；HTTP 408/5xx 为 `transient`，POST 标记 `maybe_sent`。
+
+这些是命名与分类的实现决定，不改变第 5 节的语义。
+
 ## 6. Worker、CLI 与渲染
 
 - 新增 `studio worker` 常驻进程；`studio web` 默认启动一个嵌入式 Worker 线程，使用同一持久化领取逻辑，方便现有本地工作流。

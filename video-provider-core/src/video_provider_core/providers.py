@@ -92,26 +92,27 @@ def request_json(client, method, url, **kwargs):
         raise ProviderError(
             'Provider network failure', kind='unknown_remote',
             submission_state=_post_state(method)) from exc
-    if r.status_code >= 400:
+    status = getattr(r, 'status_code', 200)
+    if status >= 400:
         # Avoid logging credentials; preserve a bounded vendor diagnostic.
         detail = r.text[:1200]
-        if r.status_code in (401, 403):
+        if status in (401, 403):
             kind, state = 'auth', 'not_sent'
-        elif r.status_code == 429:
+        elif status == 429:
             kind, state = 'rate_limited', 'not_sent'
-        elif r.status_code in (400, 422):
+        elif status in (400, 422):
             kind, state = 'invalid_request', 'not_sent'
-        elif r.status_code in (404, 409):
+        elif status in (404, 409):
             if str(method).upper() == 'POST':
                 kind, state = 'unknown_remote', 'maybe_sent'
             else:
                 kind, state = 'invalid_request', 'not_sent'
-        elif r.status_code == 408 or 500 <= r.status_code < 600:
+        elif status == 408 or 500 <= status < 600:
             kind, state = 'transient', _post_state(method)
         else:
             kind, state = 'invalid_request', 'not_sent'
         raise ProviderError(
-            f'HTTP {r.status_code} from {url}: {detail}',
+            f'HTTP {status} from {url}: {detail}',
             kind=kind, retry_after_sec=_retry_after(r), submission_state=state)
     try: data = r.json()
     except ValueError as e:
