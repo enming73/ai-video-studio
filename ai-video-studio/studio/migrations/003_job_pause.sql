@@ -1,0 +1,2 @@
+ALTER TABLE jobs ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN output_json TEXT;

@@ -1,0 +1,225 @@
+"""Persistent job lifecycle, leases and recovery decisions."""
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from uuid import uuid4
+
+from . import core
+
+TERMINAL = ('SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED')
+STATUSES = ('PENDING', 'RUNNING', 'PAUSED', *TERMINAL)
+
+
+def _canonical(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+@contextmanager
+def _tx(db=None):
+    owned = db is None
+    conn = core.connect() if owned else db
+    try:
+        if owned:
+            conn.execute('BEGIN IMMEDIATE')
+        yield conn
+        if owned:
+            conn.commit()
+    except Exception:
+        if owned:
+            conn.rollback()
+        raise
+    finally:
+        if owned:
+            conn.close()
+
+
+def _row(conn, job_id: str) -> dict:
+    row = conn.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+    if row is None:
+        raise ValueError('Unknown job')
+    return dict(row)
+
+
+def get(job_id: str, db=None) -> dict:
+    conn = db or core.connect()
+    try:
+        return _row(conn, job_id)
+    finally:
+        if db is None:
+            conn.close()
+
+
+def list_for_project(pid: str, *, status: str | None = None, limit: int = 100,
+                     db=None) -> list[dict]:
+    if status is not None and status not in STATUSES:
+        raise ValueError('Invalid job status')
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError('Invalid limit')
+    conn = db or core.connect()
+    try:
+        sql = 'SELECT * FROM jobs WHERE project_id=?'
+        args = [pid]
+        if status is not None:
+            sql += ' AND status=?'
+            args.append(status)
+        sql += ' ORDER BY created,id LIMIT ?'
+        args.append(limit)
+        return [dict(row) for row in conn.execute(sql, args)]
+    finally:
+        if db is None:
+            conn.close()
+
+
+def create(pid: str, *, kind: str, payload: dict, request_key: str,
+           run_id: str | None, budget_limit_microusd: int | None = None,
+           priority: int = 0, db=None) -> dict:
+    if not isinstance(kind, str) or not kind:
+        raise ValueError('Job kind is required')
+    if not isinstance(payload, dict):
+        raise ValueError('Job payload must be an object')
+    if not isinstance(request_key, str) or not request_key.strip():
+        raise ValueError('Request key is required')
+    if type(priority) is not int:
+        raise ValueError('Priority must be an integer')
+    if budget_limit_microusd is not None and (
+            isinstance(budget_limit_microusd, bool)
+            or not isinstance(budget_limit_microusd, int)
+            or budget_limit_microusd < 0):
+        raise ValueError('Budget must be a nonnegative integer')
+    serialized = _canonical(payload)
+    with _tx(db) as conn:
+        core.project(conn, pid)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError('An open run is required')
+        run = conn.execute('SELECT project_id,status FROM runs WHERE id=?',
+                           (run_id,)).fetchone()
+        if run is None:
+            raise ValueError('Unknown run')
+        if run['project_id'] != pid:
+            raise ValueError('Run belongs to another project')
+        if run['status'] != 'OPEN':
+            raise ValueError('Run is not open')
+        existing = conn.execute(
+            'SELECT * FROM jobs WHERE project_id=? AND request_key=?',
+            (pid, request_key)).fetchone()
+        if existing is not None:
+            if existing['payload_json'] != serialized:
+                raise ValueError('Request key reused with a different payload')
+            return dict(existing)
+        job_id = uuid4().hex
+        now = core.now()
+        conn.execute(
+            'INSERT INTO jobs(id,project_id,run_id,kind,status,request_key,'
+            'payload_json,budget_limit_microusd,priority,created,updated) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            (job_id, pid, run_id, kind, 'PENDING', request_key, serialized,
+             budget_limit_microusd, priority, now, now))
+        _append(conn, job_id, 'created', {'kind': kind, 'request_key': request_key})
+        return _row(conn, job_id)
+
+
+def _append(conn, job_id: str, event_type: str, data: dict,
+            attempt_id: str | None = None) -> str:
+    event_id = uuid4().hex
+    conn.execute(
+        'INSERT INTO job_events(id,job_id,attempt_id,type,data_json,created) '
+        'VALUES (?,?,?,?,?,?)',
+        (event_id, job_id, attempt_id, event_type,
+         json.dumps(data, ensure_ascii=False, sort_keys=True), core.now()))
+    return event_id
+
+
+def append_event(job_id: str, event_type: str, data: dict,
+                 attempt_id: str | None = None, db=None) -> str:
+    with _tx(db) as conn:
+        _row(conn, job_id)
+        return _append(conn, job_id, event_type, data, attempt_id)
+
+
+def latest_attempt(job_id: str, db=None) -> dict | None:
+    conn = db or core.connect()
+    try:
+        row = conn.execute(
+            'SELECT * FROM job_attempts WHERE job_id=? ORDER BY attempt_no DESC LIMIT 1',
+            (job_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        if db is None:
+            conn.close()
+
+
+def set_status(job_id: str, status: str, *, error_class: str | None = None,
+               error_detail: str | None = None, block_reason: str | None = None,
+               output: dict | None = None, db=None) -> dict:
+    if status not in STATUSES:
+        raise ValueError('Invalid job status')
+    with _tx(db) as conn:
+        _row(conn, job_id)
+        conn.execute(
+            'UPDATE jobs SET status=?,error_class=COALESCE(?,error_class),'
+            'error_detail=COALESCE(?,error_detail),block_reason=COALESCE(?,block_reason),'
+            'output_json=COALESCE(?,output_json),updated=? WHERE id=?',
+            (status, error_class, error_detail, block_reason,
+             json.dumps(output, ensure_ascii=False, sort_keys=True) if output is not None else None,
+             core.now(), job_id))
+        _append(conn, job_id, 'status', {'status': status,
+                                         'block_reason': block_reason,
+                                         'error_class': error_class})
+        return _row(conn, job_id)
+
+
+def pause(job_id: str, db=None) -> dict:
+    with _tx(db) as conn:
+        job = _row(conn, job_id)
+        if job['status'] in ('PENDING', 'PAUSED'):
+            conn.execute('UPDATE jobs SET status=?,updated=? WHERE id=?',
+                         ('PAUSED', core.now(), job_id))
+            _append(conn, job_id, 'paused', {})
+        elif job['status'] == 'RUNNING':
+            conn.execute('UPDATE jobs SET pause_requested=1,updated=? WHERE id=?',
+                         (core.now(), job_id))
+            _append(conn, job_id, 'pause_requested', {})
+        else:
+            raise ValueError('Job cannot be paused')
+        return _row(conn, job_id)
+
+
+def resume(job_id: str, db=None) -> dict:
+    with _tx(db) as conn:
+        job = _row(conn, job_id)
+        if job['status'] != 'PAUSED':
+            raise ValueError('Job is not paused')
+        conn.execute(
+            "UPDATE jobs SET status='PENDING',pause_requested=0,updated=? WHERE id=?",
+            (core.now(), job_id))
+        _append(conn, job_id, 'resumed', {})
+        return _row(conn, job_id)
+
+
+def cancel(job_id: str, db=None) -> dict:
+    with _tx(db) as conn:
+        job = _row(conn, job_id)
+        if job['status'] == 'CANCELLED':
+            return job
+        if job['status'] in ('PENDING', 'PAUSED'):
+            conn.execute('UPDATE jobs SET status=?,cancel_requested=1,updated=? WHERE id=?',
+                         ('CANCELLED', core.now(), job_id))
+            _append(conn, job_id, 'cancelled', {})
+        elif job['status'] == 'RUNNING':
+            conn.execute('UPDATE jobs SET cancel_requested=1,updated=? WHERE id=?',
+                         (core.now(), job_id))
+            _append(conn, job_id, 'cancel_requested',
+                    {'warning': 'remote may continue and bill'})
+        else:
+            raise ValueError('Job cannot be cancelled')
+        return _row(conn, job_id)
+
+
+def stop_requested(job_id: str, db=None) -> str | None:
+    job = get(job_id, db)
+    if job['cancel_requested']:
+        return 'cancel'
+    if job['pause_requested']:
+        return 'pause'
+    return None
