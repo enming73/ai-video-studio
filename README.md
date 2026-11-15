@@ -7,10 +7,14 @@ calls for storyboard, narration, speech and reference images now also require an
 explicit per-call `--budget`; these reservations are not provider-enforced spend
 caps.
 
-**Project status (2026-11-09):** Development along the current direction is
-paused. Future work may explore finer production details and workflow design;
-the scope has not yet been decided. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)
-for current capabilities, verification limits, and safe resumption notes.
+**Project direction (2026-11-15):** The agreed product principle is **one-click
+complete draft → optional manual refinement → targeted regeneration → reliable
+export**. See [ROADMAP.md](ROADMAP.md) for the proposed milestones and acceptance
+gates, and [the development workflow](docs/development-workflow.md) for the
+implementation and verification process. The roadmap is planning guidance, not a
+claim that automatic production is already implemented. Implementation is awaiting
+plan review. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
+and verification limits.
 
 This repository contains Studio, VBench, and their shared provider core. The
 v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
@@ -34,6 +38,9 @@ legacy workflows and caveats below originated in v0.2.
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
 - `ai-video-studio/`: Studio CLI and local visual editor with cloud task persistence and mock mode
+
+## architecture
+[![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/enming73/ai-video-studio?utm_source=readme&utm_medium=badge)
 
 ## Guided character and boundary-frame workflow
 

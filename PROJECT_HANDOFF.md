@@ -1,10 +1,29 @@
 # AI Video Studio — Project Handoff
-Date: 2026-11-09
-Status: Current development direction is paused. Future work may explore finer
-details and production workflows, but no next scope or schedule is agreed.
+Date: 2026-11-15
+Status: Product direction agreed; roadmap and M0 implementation plan drafted for
+review. Product implementation has not resumed under the new roadmap, and no
+delivery schedule or paid testing is authorized by these documents.
 
 ## Goal
-Build a complete AI filmmaking studio: create story → plan storyboard → generate character-consistent images/video → manage versions → edit sound/timeline → Director AI review → human-authorized targeted regeneration → export. Preserve existing CLI and data.
+Build a complete AI filmmaking studio: one-click complete draft → optional manual
+refinement → targeted regeneration → reliable export. The next product milestone
+is a complete, editable, recoverable 60-second draft within an authorized local
+budget policy. Preserve existing CLI, data and the guided precision workflow;
+normal automatic-draft runs should not require per-shot human confirmation.
+
+## Current planning entry points
+- [ROADMAP.md](ROADMAP.md): M0 baseline → M1 reliability/costs → M2 editing model
+  and snapshots → M3 automatic 60-second draft → M4 refinement → M5 longer films.
+- [Product constraints](docs/superpowers/specs/2026-11-15-studio-product-direction-design.md):
+  agreed principle, proposed technical defaults and implementation boundaries.
+- [Development workflow](docs/development-workflow.md): scope control, testing,
+  evidence, migration and milestone acceptance.
+- [M0 plan](docs/superpowers/plans/2026-11-15-m0-acceptance-baseline.md):
+  next proposed executable work. M0 verifies the existing local media workflow;
+  it is not a paid-provider or automatic-draft acceptance.
+
+Historical plans are context, not instructions to resume unfinished work.
+Review the current milestone before starting implementation.
 
 ## Stack
 Python CLI (`uv run --env-file .env studio ...`), `studio/` package, FastAPI (`studio web --port 8765`), React/Vite (`cd web && npm install && npm run dev`, http://127.0.0.1:5173), SQLite, FFmpeg/FFprobe, MiniMax image-to-video, OpenAI-compatible vision LLM. Project data in `studio-data/`.
@@ -75,12 +94,16 @@ For exact current commands/options always inspect `studio/cli.py` and version RE
 - Never claim browser/API end-to-end tests when only compile/ZIP tests ran.
 
 ## Current status and next steps
-The user has paused the current development direction. Do not assume a new
-release or automatically continue the previous roadmap. A later phase may
-research finer details and production flows; first clarify the desired scope,
-then inspect the current code and actual project state. The historical v0.9.5
-ZIP was not user-verified; earlier verification claims are not a substitute for
+The user has approved the product principle above and requested a durable roadmap
+and improved development process. The proposed next step is M0 after plan review,
+not automatic continuation of historical release plans. The historical v0.9.5 ZIP
+was not user-verified; earlier verification claims are not a substitute for
 testing the current repository.
+
+The 2026-11-15 baseline assessment ran Studio tests (183 passed), VBench tests
+(8 passed), frontend helper tests (5 passed) and the frontend production build
+(passed). These are historical results for that assessment, not evidence for
+future modifications or for a live paid/browser end-to-end production run.
 
 Before further paid testing, verify provider access, rates, image handling,
 budget reservations and outstanding remote tasks. Back up the local SQLite
