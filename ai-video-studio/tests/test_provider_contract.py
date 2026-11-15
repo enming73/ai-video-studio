@@ -110,3 +110,91 @@ def test_money_conversion_in_contract():
         with pytest.raises(ValueError):
             to_micro(bad)
     assert math.isfinite(to_micro('0.000001'))
+
+
+def test_provider_capabilities_contract():
+    from video_provider_core.providers import Flux, MiniMax, Wan
+    minimax = MiniMax(None).capabilities(model='MiniMax-H3')
+    assert minimax.durations == tuple(range(4, 16))
+    assert minimax.supports_first_frame is False
+    assert MiniMax(None).capabilities(i2v=True).supports_first_frame is True
+    flux = Flux(None).capabilities(model='blackforestlabs/flux-3-max/text-to-video')
+    assert flux.durations == tuple(range(5, 21))
+    assert Flux(None).capabilities(i2v=True).supports_last_frame is True
+    wan = Wan(None).capabilities(model='wan3.0-video')
+    assert wan.durations == tuple(range(2, 31))
+    assert Wan(None).capabilities(i2v=True) is None
+    assert MiniMax(None).capabilities(model='unknown') is None
+
+
+def test_estimate_cost_uses_verified_rate(monkeypatch):
+    from video_provider_core.providers import Flux, MiniMax, Wan
+    monkeypatch.delenv('MINIMAX_USD_PER_SECOND', raising=False)
+    monkeypatch.delenv('FAL_USD_PER_SECOND', raising=False)
+    monkeypatch.delenv('WAN_USD_PER_SECOND', raising=False)
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    request = VideoRequest('p', 5, 1280, 720)
+    estimate = MiniMax(None).estimate_cost(request)
+    assert estimate.amount_microusd == 500_000
+    assert estimate.pricing_version == 'MINIMAX_USD_PER_SECOND:0.1'
+    assert estimate.source == 'MINIMAX_USD_PER_SECOND'
+    monkeypatch.setenv('FAL_USD_PER_SECOND', '0.2')
+    assert Flux(None).estimate_cost(request).amount_microusd == 1_000_000
+    monkeypatch.setenv('WAN_USD_PER_SECOND', '0.05')
+    assert Wan(None).estimate_cost(request).amount_microusd == 250_000
+
+
+def test_missing_rate_returns_none_estimate(monkeypatch):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.delenv('MINIMAX_USD_PER_SECOND', raising=False)
+    assert MiniMax(None).estimate_cost(VideoRequest('p', 5, 1280, 720)) is None
+
+
+@pytest.mark.parametrize('rate', ['-1', 'abc', '200', '0'])
+def test_invalid_rate_is_rejected(monkeypatch, rate):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', rate)
+    with pytest.raises(ValueError):
+        MiniMax(None).estimate_cost(VideoRequest('p', 5, 1280, 720))
+
+
+def test_submit_video_rejects_unsupported_duration(monkeypatch):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.setenv('MINIMAX_API_KEY', 'key')
+    with client_for(lambda request: httpx.Response(200, json={'task_id': 'x'})) as client:
+        with pytest.raises(ProviderError) as caught:
+            MiniMax(client).submit_video(VideoRequest('p', 3, 1280, 720), 'idem')
+    assert caught.value.kind == 'invalid_request'
+    assert caught.value.submission_state == 'not_sent'
+
+
+def test_submit_video_wraps_legacy_result(monkeypatch):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.setenv('MINIMAX_API_KEY', 'key')
+    with client_for(lambda request: httpx.Response(200, json={'task_id': '123'})) as client:
+        job = MiniMax(client).submit_video(
+            VideoRequest('p', 5, 1280, 720, model='MiniMax-H3'), 'idem')
+    assert job == RemoteJob('minimax', '123')
+
+
+@pytest.mark.parametrize('payload,state', [
+    ({'task': {'status': 'running'}}, 'running'),
+    ({'task': {'status': 'succeeded', 'content': {'url': 'https://cdn.example/v.mp4'}}},
+     'succeeded'),
+    ({'task': {'status': 'failed', 'error': 'rejected'}}, 'failed'),
+])
+def test_status_maps_legacy_poll(monkeypatch, payload, state):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.setenv('MINIMAX_API_KEY', 'key')
+    with client_for(lambda request: httpx.Response(200, json=payload)) as client:
+        result = MiniMax(client).status(RemoteJob('minimax', '123'))
+    assert result.state == state
+    if state == 'succeeded':
+        assert result.url == 'https://cdn.example/v.mp4'
+
+
+def test_legacy_submit_and_poll_remain_available(monkeypatch):
+    from video_provider_core.providers import MiniMax
+    monkeypatch.setenv('MINIMAX_API_KEY', 'key')
+    with client_for(lambda request: httpx.Response(200, json={'task_id': 'legacy'})) as client:
+        assert MiniMax(client).submit('p', 5) == 'legacy'

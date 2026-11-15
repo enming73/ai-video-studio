@@ -2,6 +2,7 @@
 import os
 import base64
 from dataclasses import dataclass
+from decimal import Decimal
 from urllib.parse import urlparse
 import httpx
 
@@ -21,6 +22,56 @@ class Provider:
     def __init__(self, client): self.client = client
     def submit(self, prompt: str, duration: int) -> str: raise NotImplementedError
     def poll(self, remote_id: str) -> Poll: raise NotImplementedError
+
+    def capabilities(self, model: str = '', *, i2v: bool = False) -> Capability | None:
+        return None
+
+    def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
+        return None
+
+    def submit_video(self, request: VideoRequest, idempotency_key: str) -> RemoteJob:
+        capability = self.capabilities(request.model, i2v=bool(request.first_frame))
+        if capability is None or request.duration_sec not in capability.durations:
+            raise ProviderError('Unsupported duration or model',
+                                kind='invalid_request', submission_state='not_sent')
+        if request.first_frame is not None:
+            remote_id = self.submit_i2v(
+                request.prompt, request.duration_sec, request.first_frame,
+                request.first_frame_mime, request.last_frame, request.last_frame_mime)
+        else:
+            remote_id = self.submit(request.prompt, request.duration_sec)
+        return RemoteJob(self.name, remote_id)
+
+    def status(self, job: RemoteJob, *, model: str | None = None) -> RemoteStatus:
+        poll = self.poll(job.remote_id)
+        return RemoteStatus({'running': 'running', 'succeeded': 'succeeded',
+                             'failed': 'failed'}.get(poll.status, 'unknown'),
+                            url=poll.url, error_detail=poll.error)
+
+    def cancel(self, job: RemoteJob) -> bool | None:
+        return None
+
+
+def _rate(env_name: str) -> float | None:
+    raw = os.getenv(env_name)
+    if raw is None:
+        return None
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'Invalid {env_name}') from exc
+    if not 0 < rate < 100:
+        raise ValueError(f'Invalid {env_name}')
+    return rate
+
+
+def _estimate(request: VideoRequest, env_name: str) -> CostEstimate | None:
+    rate = _rate(env_name)
+    if rate is None:
+        return None
+    raw = os.getenv(env_name)
+    return CostEstimate(to_micro(Decimal(str(rate)) * request.duration_sec),
+                        f'{env_name}:{raw}', env_name)
 
 class _Classified(ProviderError):
     pass
@@ -84,7 +135,18 @@ def bearer(key):
 
 class MiniMax(Provider):
     name = 'minimax'
+    MODEL = 'MiniMax-H3'
+    SOURCE = 'https://platform.minimax.io/docs/api-reference/video-generation-v2-create'
     base = 'https://api.minimax.io'
+    def capabilities(self, model: str = '', *, i2v: bool = False) -> Capability | None:
+        if model not in ('', self.MODEL):
+            return None
+        return Capability(tuple(range(4, 16)), ('768P',),
+                          supports_first_frame=i2v, supports_last_frame=i2v,
+                          supports_cancel=False, supports_idempotency=False,
+                          source=self.SOURCE)
+    def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
+        return _estimate(request, 'MINIMAX_USD_PER_SECOND')
     def headers(self): return bearer(os.getenv('MINIMAX_API_KEY'))
     def submit(self, prompt, duration):
         data = request_json(self.client, 'POST', self.base+'/v2/video_generation', headers=self.headers(), json={
@@ -130,6 +192,23 @@ class Flux(Provider):
     name = 'flux'
     model = 'blackforestlabs/flux-3-max/text-to-video'
     i2v_model = 'blackforestlabs/flux-3-max/image-to-video'
+    SOURCE = ('https://fal.ai/api/openapi/queue/openapi.json?endpoint_id='
+              'blackforestlabs%2Fflux-3-max%2Fimage-to-video')
+    def capabilities(self, model: str = '', *, i2v: bool = False) -> Capability | None:
+        expected = self.i2v_model if i2v else self.model
+        if model not in ('', expected):
+            return None
+        return Capability(tuple(range(5, 21)), ('720p',),
+                          supports_first_frame=i2v, supports_last_frame=i2v,
+                          supports_cancel=False, supports_idempotency=False,
+                          source=self.SOURCE)
+    def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
+        return _estimate(request, 'FAL_USD_PER_SECOND')
+    def status(self, job: RemoteJob, *, model: str | None = None) -> RemoteStatus:
+        poll = self.poll(job.remote_id, model=model)
+        return RemoteStatus({'running': 'running', 'succeeded': 'succeeded',
+                             'failed': 'failed'}.get(poll.status, 'unknown'),
+                            url=poll.url, error_detail=poll.error)
     def headers(self):
         key = os.getenv('FAL_KEY')
         if not key: raise ProviderError('Missing FAL_KEY', kind='auth', submission_state='not_sent')
@@ -177,6 +256,17 @@ class Flux(Provider):
 
 class Wan(Provider):
     name = 'wan'
+    MODEL = 'wan3.0-video'
+    SOURCE = 'https://www.alibabacloud.com/help/en/model-studio/wan3-video-generation-api-reference'
+    def capabilities(self, model: str = '', *, i2v: bool = False) -> Capability | None:
+        if i2v or model not in ('', self.MODEL):
+            return None
+        return Capability(tuple(range(2, 31)), ('720P',),
+                          supports_first_frame=False, supports_last_frame=False,
+                          supports_cancel=False, supports_idempotency=False,
+                          source=self.SOURCE)
+    def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
+        return _estimate(request, 'WAN_USD_PER_SECOND')
     def __init__(self,client):
         super().__init__(client)
         self.base=os.getenv('WAN_BASE_URL','').rstrip('/')
