@@ -60,13 +60,62 @@ access and current pricing before a paid request. Budget reservations are not
 provider-enforced spending caps. Flux uploads both boundary images to fal CDN;
 file URLs are publicly accessible by default.
 
-For an unresolved video request, check the provider dashboard before retrying.
-Use **恢复 / 查询任务** for a known remote ID instead of resubmitting. A
-downloaded result that exceeds the shot duration can be trimmed to the current
-shot length and saved as a new asset; the original is retained. A completed
-remote result awaiting download can also be explicitly ended to allow a new
-attempt; its history and budget reservation remain. A new generation can incur
-another charge. For details see [the guided workflow guide](docs/guided-workflow.md).
+### Persistent Guided video jobs (M1-D2)
+
+Paid Guided video generation now creates a durable Job and returns `QUEUED`.
+Run `uv run studio worker` from `ai-video-studio/`, or use `studio web` with its
+embedded worker, to execute it. Explicit paid confirmation and a sufficient
+positive budget are still required. Mock video generation remains synchronous.
+The Job stores the prompt, model and confirmed boundary-frame paths/provenance;
+new paid submissions do not write `guided_attempts`.
+
+`GET /api/projects/{pid}/guided/attempts` merges historical rows with Job
+projections. The existing fields remain available, including `reserved_usd`,
+`remote_id`, `file`, and `asset_id`; `created` is added (empty for undated legacy
+rows). The returned `id` is the Job ID until an attempt exists, then the latest
+attempt ID. Both IDs remain valid for lookup. Reusing a request ID returns the
+existing Job, including after completion; an unresolved shot is not submitted
+again. Completed outputs are registered as selectable assets when reconciled.
+
+For unknown submissions, check the provider dashboard before taking action.
+Recovery only attaches a verified remote ID or queries/downloads an existing
+remote task; it never submits a new paid request. New Job actions use:
+
+```text
+POST /api/projects/{pid}/guided/attempts/{id}/recover
+{"confirm_checked": true, "remote_id": "VERIFIED_PROVIDER_TASK_ID"}
+
+# Query a previously attached remote ID once:
+POST /api/projects/{pid}/guided/attempts/{id}/recover
+{"confirm_checked": true}
+
+# Trim a COMPLETED Job's file to the current shot duration:
+POST /api/projects/{pid}/guided/attempts/{id}/trim
+{"confirm_checked": true}
+
+# End an unknown attempt or pending download:
+POST /api/projects/{pid}/guided/attempts/{id}/abandon
+{"confirm_checked": true}
+```
+
+Trimming registers a new asset and preserves the original file, attempt output
+and cost entries. Abandonment retains reservations and history; remote work may
+continue and bill. A newly authorized generation may incur another charge.
+Legacy recover/trim behavior remains available for historical rows.
+
+**Current React compatibility limits:** D2 does not change React. It displays the
+projected status text and existing fields, but does not automatically poll queued
+video jobs: reload/re-enter the project to refresh results. Its recover/trim
+buttons omit `confirm_checked`, so new Job actions explicitly return HTTP 400
+until the caller supplies that field. Its trim/abandon buttons are shown only for
+`DOWNLOAD_PENDING`; completed-Job trimming and unknown-attempt abandonment are
+available through the confirmed API calls above. `PAUSED` has no legacy status
+mapping and returns an explicit compatibility error; inspect/resume it through
+the Job API. These UI gaps require a later frontend change.
+
+Automated coverage uses fake providers and local media; real paid UI generation
+and real-provider recovery have not been verified. Image, LLM, TTS and vision
+paths are outside D2. See also [the guided workflow guide](docs/guided-workflow.md).
 
 ## Install
 ```bash
