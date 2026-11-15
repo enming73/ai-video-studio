@@ -63,6 +63,14 @@ def _video(root, path):
     return result
 
 
+def _video_ok(probe):
+    return bool(probe['readable'] and probe['decode_ok']
+                and probe['duration_sec'] is not None
+                and abs(probe['duration_sec'] - 60) <= 0.25
+                and (probe['width'], probe['height'], probe['fps']) == (1280, 720, 24)
+                and probe['has_audio'])
+
+
 def _captions(path, revised=False):
     blocks = []
     for seq in range(1, 7):
@@ -95,27 +103,42 @@ def _render(root, pid, report, name, subtitles):
     audio = _audio_evidence(output)
     manifest = output.with_suffix('.json')
     data = json.loads(manifest.read_text())
+    configured_subtitles = data['config'].get('subtitles')
     config = dict(data['config'])
     for key in ('narration', 'music', 'ambience', 'subtitles'):
         if config.get(key):
             config[key] = _file(root, Path(config[key]))
     selections = [{'seq': item['seq'], 'asset_id': item['selected']['id']}
                   for item in timeline.timeline(pid)]
+    with core.connect() as db:
+        render_row = db.execute(
+            'SELECT output,manifest_json FROM render_history WHERE project_id=? '
+            'ORDER BY rowid DESC LIMIT 1', (pid,)).fetchone()
+    if render_row is None:
+        raise RuntimeError('Timeline render manifest missing')
+    render_file = Path(render_row['output']).with_suffix('.json')
+    render_data = json.loads(render_row['manifest_json'])
+    render_selections = [{'seq': shot['seq'], 'asset_id': shot['asset_id']}
+                         for shot in render_data['shots']]
     report['artifacts'][name] = {
         'video': video, 'audio': audio, 'subtitles': _file(root, subtitles),
-        'manifest': _file(root, manifest), 'soundtrack': config, 'selections': selections,
+        'manifest': _file(root, manifest), 'render_manifest': _file(root, render_file),
+        'soundtrack': config, 'selections': selections,
     }
     probe = video['probe']
-    _check(report, name + '_video', (
-        probe['readable'] and abs(probe['duration_sec'] - 60) <= 0.25
-        and (probe['width'], probe['height'], probe['fps']) == (1280, 720, 24)
-        and probe['has_audio']
-    ), probe)
+    _check(report, name + '_video', _video_ok(probe), probe)
+    _check(report, name + '_render_manifest_matches_selections',
+           render_selections == selections,
+           {'rendered': render_selections, 'selected': selections})
     _check(report, name + '_audible', audio['mean_volume_db'] is not None
            and audio['mean_volume_db'] > -60, audio)
     _check(report, name + '_subtitle_configuration',
-           data['burn_subtitles'] is True and subtitles.read_text().count(' --> ') == 6,
+           data['burn_subtitles'] is True
+           and configured_subtitles is not None
+           and Path(configured_subtitles).expanduser().resolve() == subtitles.resolve()
+           and subtitles.read_text().count(' --> ') == 6,
            {'subtitle_path': str(subtitles.relative_to(root)),
+            'configured_subtitles': configured_subtitles,
             'limitation': 'Configuration only; human readability not verified'})
     return output
 
@@ -129,7 +152,9 @@ def run_baseline(output_root: Path) -> Path:
     source, environment = _identity()
     report = {
         'schema_version': 1, 'mode': 'mock_baseline', 'project_id': None,
-        'source': source, 'environment': environment, 'artifacts': {}, 'checks': [],
+        'source': source, 'environment': environment, 'artifacts': {},
+        'checks': [{'id': 'human_viewing', 'status': 'not_verified',
+                    'evidence': 'Complete viewing/listening by a person required'}],
         'costs': {'external_api_calls': 0, 'estimated_usd': 0, 'actual_usd': None,
                   'billing_status': 'not_applicable'},
         'metrics': {'elapsed_sec': 0, 'video_generation_calls': 0, 'required_clicks': None,
@@ -259,10 +284,13 @@ def run_baseline(output_root: Path) -> Path:
         report['checks'].append({'id': 'execution', 'status': 'failed',
                                  'evidence': {'stage': stage, 'error_type': type(exc).__name__}})
         report['metrics']['elapsed_sec'] = round(time.monotonic() - started, 3)
-        evidence.write_bundle_report(root, report)
+        try:
+            evidence.write_bundle_report(root, report)
+        except Exception as report_exc:
+            # Never let evidence-writing failure replace the failure under investigation.
+            print(f'Failure evidence could not be written ({type(report_exc).__name__}); '
+                  f'created directory: {root}', file=sys.stderr)
         raise
-    report['checks'].append({'id': 'human_viewing', 'status': 'not_verified',
-                             'evidence': 'Complete viewing/listening by a person required'})
     report['metrics']['elapsed_sec'] = round(time.monotonic() - started, 3)
     return evidence.write_bundle_report(root, report)
 

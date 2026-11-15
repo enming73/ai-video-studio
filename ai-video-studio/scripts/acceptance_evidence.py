@@ -21,10 +21,10 @@ def file_hash(path: Path) -> str:
 
 
 def inspect_video(path: Path) -> dict:
-    """Probe metadata; readable does not certify every frame or visual quality."""
+    """Probe metadata and fully decode; readable alone does not certify integrity."""
     result = dict.fromkeys(('duration_sec', 'width', 'height', 'fps', 'has_audio',
                             'sha256', 'error'))
-    result['readable'] = False
+    result.update(readable=False, decode_ok=False)
     try:
         result['sha256'] = file_hash(path)
         proc = subprocess.run(
@@ -42,6 +42,14 @@ def inspect_video(path: Path) -> dict:
             height=int(video['height']), fps=fps,
             has_audio=any(s.get('codec_type') == 'audio' for s in data['streams']),
         )
+        decode = subprocess.run(
+            ['ffmpeg', '-v', 'error', '-xerror', '-i', str(path), '-map', '0',
+             '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=300,
+        )
+        result['decode_ok'] = decode.returncode == 0
+        if not result['decode_ok']:
+            result['error'] = 'Media did not fully decode'
     except (OSError, subprocess.SubprocessError, ValueError, KeyError,
             StopIteration, ZeroDivisionError) as exc:
         # Do not copy arbitrary tool output or absolute filenames into the report.
@@ -95,6 +103,9 @@ def write_bundle_report(root: Path, evidence: dict) -> Path:
         _fields(check, ('id', 'status', 'evidence'), 'check')
         if check['status'] not in ('passed', 'failed', 'not_verified') or not check['evidence']:
             raise ValueError('Check needs an explicit status and evidence')
+    if not any(c['id'] == 'human_viewing' and c['status'] == 'not_verified'
+               for c in evidence['checks']):
+        raise ValueError('Human viewing must remain explicitly unverified')
     expected_costs = {'external_api_calls': 0, 'estimated_usd': 0,
                       'actual_usd': None, 'billing_status': 'not_applicable'}
     if evidence['costs'] != expected_costs:

@@ -28,10 +28,14 @@ def load_runner():
 def baseline_bundle(tmp_path_factory):
     runner = load_runner()
     root = tmp_path_factory.mktemp('acceptance-parent') / 'bundle'
+    sentinel_home = tmp_path_factory.mktemp('real-home')
+    sentinel_db = sentinel_home / 'studio.sqlite3'
+    sentinel_db.write_bytes(b'sentinel-project-database')
     home, send = core.HOME, httpx.Client.send
     observations = []
     real_export = sound.export
     with ExitStack() as stack:
+        stack.enter_context(patch.object(core, 'HOME', sentinel_home))
         generated = stack.enter_context(patch.object(core, 'mock_generate', wraps=core.mock_generate))
         for provider in set(core.PROVIDERS.values()):
             for name in ('submit', 'submit_i2v'):
@@ -47,6 +51,7 @@ def baseline_bundle(tmp_path_factory):
         report_path = runner.run_baseline(root)
     assert core.HOME == home
     assert httpx.Client.send is send
+    assert sentinel_db.read_bytes() == b'sentinel-project-database'
     report = json.loads(report_path.read_text())
     report['test_generation_calls_at_exports'] = observations
     return root, report
@@ -103,7 +108,39 @@ def test_60_second_baseline_bundle(baseline_bundle):
     assert report['metrics']['video_generation_calls'] == 6
     assert report['metrics']['required_clicks'] is None
     assert report['metrics']['elapsed_sec'] > 0
-    assert all(c['status'] != 'failed' for c in report['checks'])
+    assert report['metrics']['blocked_http_attempts'] == 0
+    checks = {c['id']: c['status'] for c in report['checks']}
+    assert checks['no_external_http'] == 'passed'
+    assert checks['human_viewing'] == 'not_verified'
+    for name in ('baseline', 'shot_replacement', 'subtitle_revision'):
+        assert checks[f'{name}_video'] == 'passed'
+        assert checks[f'{name}_render_manifest_matches_selections'] == 'passed'
+        data = report['artifacts'][name]
+        assert (root / data['manifest']['path']).is_file()
+        assert (root / data['render_manifest']['path']).is_file()
+        shots = json.loads((root / data['render_manifest']['path']).read_text())['shots']
+        assert [{'seq': s['seq'], 'asset_id': s['asset_id']} for s in shots] == data['selections']
+        assert json.loads((root / data['manifest']['path']).read_text())['config']['subtitles'] \
+            == str((root / data['subtitles']['path']).resolve())
+
+
+def _artifact_paths(value):
+    if isinstance(value, dict):
+        if 'path' in value and 'sha256' in value:
+            yield value
+        for child in value.values():
+            yield from _artifact_paths(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _artifact_paths(child)
+
+
+def test_all_reported_artifacts_match_hashes(baseline_bundle):
+    root, report = baseline_bundle
+    artifacts = list(_artifact_paths(report['artifacts']))
+    assert len(artifacts) >= 15
+    for item in artifacts:
+        assert hashlib.sha256((root / item['path']).read_bytes()).hexdigest() == item['sha256']
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])
@@ -145,6 +182,30 @@ def test_missing_tools_leave_failure_evidence(tmp_path, monkeypatch):
     assert report['environment']['errors']
     assert any(c['status'] == 'failed' for c in report['checks'])
     assert core.HOME == home
+
+
+def test_truncated_media_cannot_pass_video_check(tmp_path):
+    runner = load_runner()
+    video = tmp_path / 'truncated.mp4'
+    subprocess.run([
+        'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=24:d=4',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-t', '4', str(video),
+    ], check=True)
+    payload = video.read_bytes()
+    video.write_bytes(payload[:len(payload) // 10])
+    probe = runner.evidence.inspect_video(video)
+    assert probe['decode_ok'] is False
+    assert runner._video_ok(probe) is False
+
+
+def test_report_write_failure_preserves_original_error(tmp_path, monkeypatch):
+    runner = load_runner()
+    monkeypatch.setenv('PATH', '')
+    monkeypatch.setattr(runner.evidence, 'write_bundle_report',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('disk full')))
+    with pytest.raises(RuntimeError, match='ffmpeg'):
+        runner.run_baseline(tmp_path / 'bundle')
 
 
 def test_local_edits_reuse_other_video_assets(baseline_bundle):
