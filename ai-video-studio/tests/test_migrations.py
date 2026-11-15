@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from studio import migrations
+from studio import core, migrations
 
 
 def make_migration_dir(tmp_path: Path) -> Path:
@@ -210,4 +210,56 @@ def test_duplicate_cost_entry_per_attempt_stage_is_rejected(foundation_db):
     add_cost('c3', attempt=None, stage='video', legacy='shots:s1')
     with pytest.raises(sqlite3.IntegrityError):
         add_cost('c4', attempt=None, stage='video', legacy='shots:s1')
+
+
+def legacy_database(home: Path) -> Path:
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / 'studio.sqlite3'
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE projects(id TEXT PRIMARY KEY, prompt TEXT, duration INTEGER,
+                              provider TEXT, budget REAL, status TEXT, created TEXT);
+        CREATE TABLE shots(id TEXT PRIMARY KEY, project_id TEXT, reserved_usd REAL);
+        CREATE TABLE guided_attempts(id TEXT PRIMARY KEY, project_id TEXT,
+                                     shot_id TEXT, reserved_usd REAL);
+    """)
+    db.execute("INSERT INTO projects VALUES ('legacy','x',20,'mock',5,'CREATED','now')")
+    db.execute("INSERT INTO shots VALUES ('s1','legacy',1.5)")
+    db.commit()
+    db.close()
+    return path
+
+
+def test_connect_applies_migrations_to_new_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    with core.connect() as db:
+        versions = [row[0] for row in db.execute(
+            'SELECT version FROM schema_migrations ORDER BY version')]
+    assert versions == [1, 2]
+
+
+def test_connect_migrates_existing_database_once(tmp_path, monkeypatch):
+    legacy_database(tmp_path)
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    with core.connect() as db:
+        first = db.execute('SELECT COUNT(*) FROM cost_entries').fetchone()[0]
+    with core.connect() as db:
+        second = db.execute('SELECT COUNT(*) FROM cost_entries').fetchone()[0]
+        migrations_count = db.execute(
+            'SELECT COUNT(*) FROM schema_migrations').fetchone()[0]
+    assert first == second == 1
+    assert migrations_count == 2
+
+
+def test_connect_creates_backup_before_upgrading_existing_database(tmp_path, monkeypatch):
+    legacy_database(tmp_path)
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    with core.connect():
+        pass
+    backups = sorted((tmp_path / 'backups').glob('pre-m1-*.sqlite3'))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as backup:
+        assert backup.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+        assert backup.execute('SELECT id FROM projects').fetchone()[0] == 'legacy'
+
 

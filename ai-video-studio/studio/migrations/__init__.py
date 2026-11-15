@@ -78,6 +78,11 @@ def _has_legacy_data(db) -> bool:
     return False
 
 
+def has_legacy_data(db) -> bool:
+    """True when an existing database has rows a migration could damage."""
+    return _has_legacy_data(db)
+
+
 def backup_database(db, db_path: Path, backup_root: Path) -> Path:
     backup_root = Path(backup_root)
     backup_root.mkdir(parents=True, exist_ok=True)

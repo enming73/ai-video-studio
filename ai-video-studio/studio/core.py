@@ -26,9 +26,15 @@ def now():
 
 def connect():
     HOME.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(HOME / "studio.sqlite3", timeout=30)
+    db_path = HOME / "studio.sqlite3"
+    existed = db_path.exists()
+    db = sqlite3.connect(db_path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    from . import migrations
+    pending = migrations.pending(db)
+    if existed and pending and migrations.has_legacy_data(db):
+        migrations.backup_database(db, db_path, HOME / "backups")
     db.executescript("""
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY, prompt TEXT NOT NULL, duration INTEGER NOT NULL,
@@ -149,6 +155,7 @@ def connect():
         if name not in provenance_columns:
             db.execute(f"ALTER TABLE guided_video_provenance ADD COLUMN {name} {kind}")
     db.commit()
+    migrations.apply(db, db_path, backup=False)
     return db
 
 def project(db, pid):
