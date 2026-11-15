@@ -1,6 +1,8 @@
 """Local-only REST API for v0.7 React timeline editor. No paid AI calls."""
 from __future__ import annotations
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -11,7 +13,21 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.9.5", docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+@asynccontextmanager
+async def lifespan(app):
+    if os.getenv('STUDIO_DISABLE_EMBEDDED_WORKER') != '1':
+        from . import worker
+        worker.start_embedded()
+    try:
+        yield
+    finally:
+        from . import worker
+        worker.stop_embedded()
+
+
+app = FastAPI(title="AI Video Studio", version="0.9.5", docs_url="/api/docs",
+              openapi_url="/api/openapi.json", lifespan=lifespan)
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)

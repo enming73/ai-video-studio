@@ -146,9 +146,44 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
     return job_id
 
 
-def run_forever(owner: str | None = None, poll_seconds: float = 2) -> None:
+def run_forever(owner: str | None = None, poll_seconds: float = 2,
+                stop_event: threading.Event | None = None) -> None:
     from .handlers import register_all
-    register_all()
-    while True:
+    if not HANDLERS:
+        register_all()
+    while stop_event is None or not stop_event.is_set():
         if run_once(owner) is None:
-            time.sleep(poll_seconds)
+            if stop_event is not None:
+                if stop_event.wait(poll_seconds):
+                    break
+            else:
+                time.sleep(poll_seconds)
+
+
+_embedded_lock = threading.Lock()
+_embedded_thread: threading.Thread | None = None
+_embedded_stop: threading.Event | None = None
+
+
+def start_embedded(owner: str = 'embedded', *, poll_seconds: float = 2) -> threading.Thread:
+    global _embedded_thread, _embedded_stop
+    with _embedded_lock:
+        if _embedded_thread is not None and _embedded_thread.is_alive():
+            return _embedded_thread
+        stop = threading.Event()
+        thread = threading.Thread(target=run_forever, args=(owner, poll_seconds, stop),
+                                  name='studio-embedded-worker', daemon=True)
+        _embedded_thread, _embedded_stop = thread, stop
+        thread.start()
+        return thread
+
+
+def stop_embedded(timeout: float = 5) -> None:
+    global _embedded_thread, _embedded_stop
+    with _embedded_lock:
+        thread, stop = _embedded_thread, _embedded_stop
+        _embedded_thread = _embedded_stop = None
+    if stop is not None:
+        stop.set()
+    if thread is not None:
+        thread.join(timeout)
