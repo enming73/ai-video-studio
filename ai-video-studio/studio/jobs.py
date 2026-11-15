@@ -84,7 +84,7 @@ def list_for_project(pid: str, *, status: str | None = None, limit: int = 100,
 
 def create(pid: str, *, kind: str, payload: dict, request_key: str,
            run_id: str | None, budget_limit_microusd: int | None = None,
-           priority: int = 0, db=None) -> dict:
+           priority: int = 0, target_key: str | None = None, db=None) -> dict:
     if not isinstance(kind, str) or not kind:
         raise ValueError('Job kind is required')
     if not isinstance(payload, dict):
@@ -122,10 +122,10 @@ def create(pid: str, *, kind: str, payload: dict, request_key: str,
         now = core.now()
         conn.execute(
             'INSERT INTO jobs(id,project_id,run_id,kind,status,request_key,'
-            'payload_json,budget_limit_microusd,priority,created,updated) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            'payload_json,budget_limit_microusd,priority,target_key,created,updated) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
             (job_id, pid, run_id, kind, 'PENDING', request_key, serialized,
-             budget_limit_microusd, priority, now, now))
+             budget_limit_microusd, priority, target_key, now, now))
         _append(conn, job_id, 'created', {'kind': kind, 'request_key': request_key})
         return _row(conn, job_id)
 
