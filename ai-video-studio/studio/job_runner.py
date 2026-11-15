@@ -124,6 +124,9 @@ def run_until(job_ids: list[str], *, owner: str | None = None,
               timeout: float | None = None) -> list[dict]:
     import time
     from . import worker
+    from .handlers import register_all
+    if not worker.HANDLERS:
+        register_all()
     deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
         states = [jobs.get(job_id) for job_id in job_ids]
