@@ -73,7 +73,7 @@ M0 现状验收基线
 
 ## M1 — 可恢复任务、Provider 契约与统一费用
 
-**状态：待规划。依赖：M0。**
+**状态：实施中（M1-A 已完成并合并，M1-B/C/D/E 待规划）。依赖：M0。**
 
 工作包：
 
@@ -87,6 +87,8 @@ M0 现状验收基线
 - 改造 `video-provider-core/src/video_provider_core/providers.py`、`media.py`。
 - 新增 Studio 的任务服务、账本服务和版本化迁移模块，逐步从 `core.connect()` 中移出新增迁移。
 - 接入 `core.py`、`guided_generation.py`、`guided_storyboard.py`、`guided_images.py`、`guided_boundaries.py`、`reference_generation.py`、`narration.py`、`director_vision.py`、`continuity_vision.py`、`webapp.py`、`guided_web.py`。
+
+进展：M1-A（版本化迁移与费用账本）已完成并合并，计划见 `docs/superpowers/plans/2026-11-15-m1a-migrations-ledger.md`，Studio 测试 238 项通过。账本与迁移基础已具备，但付费入口尚未接入，因此下列退出条件仍保持未完成。
 
 退出条件：
 
