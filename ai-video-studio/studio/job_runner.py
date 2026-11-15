@@ -80,7 +80,7 @@ def enqueue_shot(pid: str, seq: int, *, run_id: str, provider: str, model: str,
             f'AND status IN ({",".join("?" for _ in UNRESOLVED)}) LIMIT 1',
             (pid, f'shot:{shot["id"]}', *UNRESOLVED)).fetchone()
         if active:
-            raise ValueError('Shot already has an unresolved video job')
+            return dict(conn.execute('SELECT * FROM jobs WHERE project_id=? AND target_key=? ORDER BY created DESC LIMIT 1', (pid, f'shot:{shot["id"]}')).fetchone())
         payload = {
             'prompt': shot['prompt'], 'duration_sec': shot['duration'],
             'width': 1280, 'height': 720, 'provider': provider, 'model': model,
@@ -106,9 +106,14 @@ def enqueue_project(pid: str, *, budget_usd: float, request_key: str, limit: int
             raise ValueError('Mock projects use local generation')
         run_id = open_or_reuse_run(pid, request_key=request_key,
                                    budget_microusd=budget, label=request_key, db=conn)
+        blocked = ('SUBMITTING', 'GENERATING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
+        placeholders = ','.join('?' for _ in blocked)
         shots = [dict(row) for row in conn.execute(
-            "SELECT * FROM shots WHERE project_id=? AND status!='COMPLETED' ORDER BY seq",
-            (pid,))]
+            f"SELECT * FROM shots WHERE project_id=? AND status NOT IN ('COMPLETED',{placeholders}) ORDER BY seq",
+            (pid, *blocked))]
+        skipped = [dict(row) for row in conn.execute(
+            f'SELECT id,seq,status FROM shots WHERE project_id=? AND status IN ({placeholders})',
+            (pid, *blocked))]
         if limit:
             shots = shots[:limit]
         created = []
@@ -117,7 +122,7 @@ def enqueue_project(pid: str, *, budget_usd: float, request_key: str, limit: int
                 pid, shot['seq'], run_id=run_id, provider=provider,
                 model=_MODELS[provider], request_key=f'{request_key}:{shot["id"]}',
                 db=conn))
-        return {'run_id': run_id, 'jobs': created}
+        return {'run_id': run_id, 'jobs': created, 'skipped': skipped}
 
 
 def run_until(job_ids: list[str], *, owner: str | None = None,

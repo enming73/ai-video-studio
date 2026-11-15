@@ -9,13 +9,18 @@ router = APIRouter(prefix='/api')
 
 
 def _checked(pid: str):
-    with core.connect() as db:
-        core.project(db, pid)
+    try:
+        with core.connect() as db:
+            core.project(db, pid)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get('/projects/{pid}/jobs')
 def list_jobs(pid: str, status: str | None = None):
     _checked(pid)
+    from . import job_runner
+    job_runner.reconcile(pid)
     try:
         return jobs.list_for_project(pid, status=status)
     except ValueError as exc:
@@ -28,6 +33,9 @@ def get_job(jid: str):
         data = jobs.get(jid)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+    from . import job_runner
+    job_runner.reconcile(data['project_id'])
+    data = jobs.get(jid)
     data['attempts'] = attempts.list_for_job(jid)
     return data
 

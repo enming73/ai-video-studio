@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from uuid import uuid4
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
@@ -268,7 +268,7 @@ def production_estimate(pid: str,body: GenerateProjectRequest):
     return {'estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
 
 @app.post('/api/projects/{pid}/production/generate',status_code=202)
-def production_generate(pid: str,body: GenerateProjectRequest):
+def production_generate(pid: str,body: GenerateProjectRequest,idempotency_key: str | None = Header(None, alias='Idempotency-Key')):
     checked_pid(pid)
     if not body.live:
         return {'status':'dry_run','estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
@@ -284,8 +284,13 @@ def production_generate(pid: str,body: GenerateProjectRequest):
             raise HTTPException(400,'Run budget cannot exceed project budget')
     api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)
     from . import job_runner
-    enqueued=job_runner.enqueue_project(pid,budget_usd=body.budget,
-                                        request_key=uuid4().hex,limit=body.limit)
+    job_runner.reconcile(pid)
+    try:
+        enqueued=job_runner.enqueue_project(pid,budget_usd=body.budget,
+                                            request_key=idempotency_key or uuid4().hex,
+                                            limit=body.limit)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
     return {'id':enqueued['run_id'],'run_id':enqueued['run_id'],
             'job_ids':[job['id'] for job in enqueued['jobs']],'status':'queued'}
 
@@ -297,7 +302,7 @@ def production_job(pid: str,jid: str):
     with core.connect() as db:
         row=db.execute('SELECT * FROM jobs WHERE project_id=? AND id=?',(pid,jid)).fetchone()
         if row:
-            data=dict(row); data['jobs']=[data]
+            data=dict(row); data['jobs']=[dict(data)]
         else:
             data={'id':jid,'project_id':pid,'run_id':jid,
                   'jobs':[dict(r) for r in db.execute(

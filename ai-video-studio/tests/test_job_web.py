@@ -144,3 +144,30 @@ def test_costs_endpoint_exposes_unknown_and_committed(api, project):
     assert data['committed_microusd'] == 100_000
     assert data['open_exposure_microusd'] == 100_000
     assert 'not a provider invoice' in data['note']
+
+
+def test_duplicate_post_with_idempotency_key_reuses_run(api, tmp_path, monkeypatch):
+    pid = cloud_project(tmp_path, monkeypatch)
+    body = {'live': True, 'budget': 5, 'confirm_paid': True,
+            'confirmation_project_id': pid}
+    first = api.post(f'/api/projects/{pid}/production/generate', json=body,
+                     headers={'Idempotency-Key': 'same'})
+    second = api.post(f'/api/projects/{pid}/production/generate', json=body,
+                      headers={'Idempotency-Key': 'same'})
+    assert first.json()['job_ids'] == second.json()['job_ids']
+    assert len(jobs.list_for_project(pid)) == 2
+
+
+def test_production_job_by_job_id_serializes(api, tmp_path, monkeypatch):
+    pid = cloud_project(tmp_path, monkeypatch)
+    created = api.post(f'/api/projects/{pid}/production/generate', json={
+        'live': True, 'budget': 5, 'confirm_paid': True,
+        'confirmation_project_id': pid}).json()
+    job_id = created['job_ids'][0]
+    response = api.get(f'/api/projects/{pid}/production/jobs/{job_id}')
+    assert response.status_code == 200
+    assert response.json()['jobs'][0]['id'] == job_id
+
+
+def test_unknown_project_jobs_returns_404(api):
+    assert api.get('/api/projects/nope/jobs').status_code == 404

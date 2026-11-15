@@ -152,7 +152,11 @@ def run_forever(owner: str | None = None, poll_seconds: float = 2,
     if not HANDLERS:
         register_all()
     while stop_event is None or not stop_event.is_set():
-        if run_once(owner) is None:
+        try:
+            worked = run_once(owner) is not None
+        except Exception:
+            worked = False
+        if not worked:
             if stop_event is not None:
                 if stop_event.wait(poll_seconds):
                     break

@@ -25,13 +25,14 @@ def test_enqueue_is_idempotent_per_request_key(project):
     assert len(jobs.list_for_project(pid)) == 1
 
 
-def test_enqueue_rejects_unresolved_job_for_same_shot(project):
+def test_enqueue_reuses_unresolved_job_for_same_shot(project):
     pid, run_id, _ = project
-    job_runner.enqueue_shot(pid, 1, run_id=run_id, provider='minimax',
-                            model='MiniMax-H3', request_key='one')
-    with pytest.raises(ValueError, match='unresolved'):
-        job_runner.enqueue_shot(pid, 1, run_id=run_id, provider='minimax',
-                                model='MiniMax-H3', request_key='two')
+    first = job_runner.enqueue_shot(pid, 1, run_id=run_id, provider='minimax',
+                                    model='MiniMax-H3', request_key='one')
+    second = job_runner.enqueue_shot(pid, 1, run_id=run_id, provider='minimax',
+                                     model='MiniMax-H3', request_key='two')
+    assert first['id'] == second['id']
+    assert len(jobs.list_for_project(pid)) == 1
 
 
 def test_completed_job_updates_shot(project):
