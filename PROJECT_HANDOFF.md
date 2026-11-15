@@ -2,9 +2,10 @@
 Date: 2026-11-15
 Status: Roadmap approved; M0 local acceptance tooling implemented and accepted by
 the user on 2026-11-15 within its documented scope. M1-A (versioned migrations
-and cost ledger) is merged and verified by 238 Studio tests; paid entry points
-are not yet wired to the ledger. No paid testing was performed or authorized.
-The next proposed step is M1-B (Provider contract), followed by M1-C (Job/Worker).
+and cost ledger) and M1-B (provider contract, classified errors, capabilities,
+cost estimates) are merged and verified by 286 Studio tests and 8 VBench tests.
+Paid entry points are not yet wired to the ledger or contract. No paid testing was
+performed or authorized. The next proposed step is M1-C (Job/Worker).
 
 ## Goal
 Build a complete AI filmmaking studio: one-click complete draft → optional manual
