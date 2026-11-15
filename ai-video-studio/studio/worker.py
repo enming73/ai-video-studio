@@ -18,11 +18,20 @@ class JobStopped(Exception):
         super().__init__(action)
 
 
+class JobBlocked(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 class Control:
     def checkpoint(self, job_id: str):
         action = jobs.stop_requested(job_id)
         if action:
             raise JobStopped(action)
+
+    def block(self, reason: str):
+        raise JobBlocked(reason)
 
 
 def register(kind: str, handler) -> None:
@@ -85,6 +94,8 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
     except JobStopped as stop:
         jobs.set_status(job_id, 'PAUSED' if stop.action == 'pause' else 'CANCELLED',
                         block_reason=None)
+    except JobBlocked as blocked:
+        jobs.set_status(job_id, 'BLOCKED', block_reason=blocked.reason)
     except ProviderError as exc:
         if exc.kind in ('unknown_remote', 'auth'):
             _finish_blocked(job_id, str(exc))

@@ -1,6 +1,8 @@
-"""Handler registration. Video is added in M1-C Task 5."""
+"""Handler registration for the persistent worker."""
 from __future__ import annotations
 
 
 def register_all() -> None:
-    return None
+    from ..worker import register
+    from . import video
+    register('video', video)
