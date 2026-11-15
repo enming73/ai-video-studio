@@ -30,8 +30,9 @@ def test_flux_schema_lists_each_second_from_five_to_twenty():
     assert result['durations'] == list(range(5, 21))
 
 
-def test_studio_capabilities_match_provider_contract():
+def test_studio_capabilities_match_provider_contract(monkeypatch):
     from video_provider_core.providers import Flux, MiniMax, Wan
+    monkeypatch.delenv('WAN_BASE_URL', raising=False)
     cases = [
         ('minimax', 'MiniMax-H3', MiniMax(None), False),
         ('flux', 'blackforestlabs/flux-3-max/text-to-video', Flux(None), False),

@@ -60,17 +60,27 @@ class CostEstimate:
 class ProviderError(RuntimeError):
     """A classified provider failure, safe for workflow decisions."""
 
-    def __init__(self, message: str, *, kind: str = 'invalid_request',
+    def __init__(self, message: str, *, kind: str,
                  retry_after_sec: int | None = None,
-                 submission_state: str = 'not_sent'):
+                 submission_state: str | None = None):
         if kind not in ERROR_KINDS:
             raise ValueError(f'Unknown provider error kind: {kind}')
+        if submission_state is None:
+            submission_state = 'maybe_sent' if kind == 'unknown_remote' else 'not_sent'
         if submission_state not in SUBMISSION_STATES:
             raise ValueError(f'Invalid submission state: {submission_state}')
         self.kind = kind
         self.retry_after_sec = retry_after_sec
         self.submission_state = submission_state
         super().__init__(message)
+
+
+RETRYABLE_KINDS = frozenset({'rate_limited', 'transient'})
+
+
+def is_retryable(error: ProviderError) -> bool:
+    """Only a failure proven not to have been sent may be retried."""
+    return error.kind in RETRYABLE_KINDS and error.submission_state == 'not_sent'
 
 
 def to_micro(usd) -> int:

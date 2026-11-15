@@ -19,6 +19,9 @@ class Poll:
 
 class Provider:
     name = ''
+    _NOMINAL = {'768P': (1366, 768), '720p': (1280, 720), '720P': (1280, 720)}
+    _FRAME_MIMES = ('image/png', 'image/jpeg', 'image/webp')
+
     def __init__(self, client): self.client = client
     def submit(self, prompt: str, duration: int) -> str: raise NotImplementedError
     def poll(self, remote_id: str) -> Poll: raise NotImplementedError
@@ -29,11 +32,37 @@ class Provider:
     def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
         return None
 
+    def _validate_request(self, request: VideoRequest, capability: Capability) -> None:
+        def invalid(message):
+            raise ProviderError(message, kind='invalid_request', submission_state='not_sent')
+
+        if not isinstance(request.prompt, str) or not request.prompt.strip():
+            invalid('Prompt is required')
+        if (type(request.width) is not int or type(request.height) is not int
+                or request.width <= 0 or request.height <= 0):
+            invalid('Invalid resolution')
+        limits = [self._NOMINAL[item] for item in capability.resolutions
+                  if item in self._NOMINAL]
+        if not limits or not any(request.width <= width and request.height <= height
+                                 for width, height in limits):
+            invalid('Unsupported resolution')
+        if request.last_frame is not None and request.first_frame is None:
+            invalid('A last frame requires a first frame')
+        for frame, mime in ((request.first_frame, request.first_frame_mime),
+                            (request.last_frame, request.last_frame_mime)):
+            if frame is None:
+                continue
+            if not isinstance(frame, bytes) or not frame:
+                invalid('Frame must be nonempty bytes')
+            if mime not in self._FRAME_MIMES:
+                invalid('Unsupported frame MIME type')
+
     def submit_video(self, request: VideoRequest, idempotency_key: str) -> RemoteJob:
-        capability = self.capabilities(request.model, i2v=bool(request.first_frame))
+        capability = self.capabilities(request.model, i2v=request.first_frame is not None)
         if capability is None or request.duration_sec not in capability.durations:
             raise ProviderError('Unsupported duration or model',
                                 kind='invalid_request', submission_state='not_sent')
+        self._validate_request(request, capability)
         if request.first_frame is not None:
             remote_id = self.submit_i2v(
                 request.prompt, request.duration_sec, request.first_frame,
@@ -79,6 +108,27 @@ class _Classified(ProviderError):
 def _post_state(method):
     return 'maybe_sent' if str(method).upper() == 'POST' else 'not_sent'
 
+def _bounded(value, limit=1200):
+    text = str(value)
+    return text[:limit] + ('...[truncated]' if len(text) > limit else '')
+
+def _vendor_kind(message):
+    text = str(message).lower()
+    if any(word in text for word in (
+            'api key', 'apikey', 'auth', 'permission', 'unauthorized',
+            'balance', 'insufficient')):
+        return 'auth'
+    if any(word in text for word in (
+            'rate limit', 'ratelimit', 'too many', 'frequency', 'throttle')):
+        return 'rate_limited'
+    if any(word in text for word in (
+            'moderation', 'sensitive', 'policy', 'content')):
+        return 'content_rejected'
+    if any(word in text for word in (
+            'internal', 'timeout', 'busy', 'server', 'temporar')):
+        return 'transient'
+    return 'invalid_request'
+
 def _retry_after(response):
     value = response.headers.get('Retry-After')
     if value is not None and value.isdigit():
@@ -122,10 +172,12 @@ def request_json(client, method, url, **kwargs):
         raise ProviderError('Unexpected API response', kind='unknown_remote',
                             submission_state=_post_state(method))
     if 'base_resp' in data and data['base_resp'].get('status_code', 0) != 0:
-        raise ProviderError(str(data['base_resp']), kind='invalid_request',
+        detail = _bounded(data['base_resp'])
+        raise ProviderError(detail, kind=_vendor_kind(detail),
                             submission_state='not_sent')
     if data.get('code') and data.get('message'):
-        raise ProviderError(str(data['message']), kind='invalid_request',
+        detail = _bounded(data['message'])
+        raise ProviderError(detail, kind=_vendor_kind(detail),
                             submission_state='not_sent')
     return data
 
@@ -154,7 +206,7 @@ class MiniMax(Provider):
             'model':'MiniMax-H3', 'content':[{'type':'text','text':prompt}],
             'resolution':'768P','duration':duration,'ratio':'16:9'})
         rid = data.get('task_id')
-        if not rid: raise ProviderError(f'MiniMax missing task_id: {data}',
+        if not rid: raise ProviderError(_bounded(f'MiniMax missing task_id: {data}'),
                                         kind='unknown_remote', submission_state='maybe_sent')
         return str(rid)
     def submit_i2v(self, prompt, duration, first_frame, mime_type, last_frame=None, last_mime_type=None):
@@ -184,7 +236,7 @@ class MiniMax(Provider):
             if not url: raise ProviderError('MiniMax success without video URL',
                                             kind='unknown_remote', submission_state='confirmed')
             return Poll('succeeded',url)
-        if status in ('failed','cancelled','canceled'): return Poll('failed',error=str(task.get('error',status)))
+        if status in ('failed','cancelled','canceled'): return Poll('failed',error=_bounded(task.get('error',status)))
         if status in ('queued','running','preparing','processing','pending','in_progress'): return Poll('running')
         raise ProviderError(f'Unknown MiniMax status: {status}',
                             kind='unknown_remote', submission_state='confirmed')
@@ -193,8 +245,10 @@ class Flux(Provider):
     name = 'flux'
     model = 'blackforestlabs/flux-3-max/text-to-video'
     i2v_model = 'blackforestlabs/flux-3-max/image-to-video'
-    SOURCE = ('https://fal.ai/api/openapi/queue/openapi.json?endpoint_id='
-              'blackforestlabs%2Fflux-3-max%2Fimage-to-video')
+    T2V_SOURCE = ('https://fal.ai/api/openapi/queue/openapi.json?endpoint_id='
+                  'blackforestlabs%2Fflux-3-max%2Ftext-to-video')
+    I2V_SOURCE = ('https://fal.ai/api/openapi/queue/openapi.json?endpoint_id='
+                  'blackforestlabs%2Fflux-3-max%2Fimage-to-video')
     def capabilities(self, model: str = '', *, i2v: bool = False) -> Capability | None:
         expected = self.i2v_model if i2v else self.model
         if model not in ('', expected):
@@ -202,7 +256,7 @@ class Flux(Provider):
         return Capability(tuple(range(5, 21)), ('720p',),
                           supports_first_frame=i2v, supports_last_frame=i2v,
                           supports_cancel=False, supports_idempotency=False,
-                          source=self.SOURCE)
+                          source=self.I2V_SOURCE if i2v else self.T2V_SOURCE)
     def estimate_cost(self, request: VideoRequest) -> CostEstimate | None:
         return _estimate(request, 'FAL_USD_PER_SECOND')
     def status(self, job: RemoteJob, *, model: str | None = None) -> RemoteStatus:
@@ -219,7 +273,7 @@ class Flux(Provider):
             'prompt':prompt,'duration':int(duration),'resolution':'720p',
             'aspect_ratio':'16:9','reasoning_level':'high','generate_audio':True})
         rid=data.get('request_id')
-        if not rid: raise ProviderError(f'fal missing request_id: {data}',
+        if not rid: raise ProviderError(_bounded(f'fal missing request_id: {data}'),
                                         kind='unknown_remote', submission_state='maybe_sent')
         return str(rid)
     def submit_i2v(self, prompt, duration, first_frame, mime_type, last_frame=None, last_mime_type=None):
@@ -282,7 +336,7 @@ class Wan(Provider):
           headers=self.headers(),json={'model':'wan3.0-video','input':{'prompt':prompt},
           'parameters':{'resolution':'720P','ratio':'16:9','duration':duration,'prompt_extend':False}})
         rid=(data.get('output') or {}).get('task_id')
-        if not rid: raise ProviderError(f'Wan missing task_id: {data}',
+        if not rid: raise ProviderError(_bounded(f'Wan missing task_id: {data}'),
                                         kind='unknown_remote', submission_state='maybe_sent')
         return str(rid)
     def poll(self,remote_id):
@@ -294,7 +348,7 @@ class Wan(Provider):
             if not out.get('video_url'): raise ProviderError('Wan success without video URL',
                                                              kind='unknown_remote', submission_state='confirmed')
             return Poll('succeeded',out['video_url'])
-        if status in ('FAILED','CANCELED','UNKNOWN'): return Poll('failed',error=str(out.get('message',status)))
+        if status in ('FAILED','CANCELED','UNKNOWN'): return Poll('failed',error=_bounded(out.get('message',status)))
         if status in ('PENDING','RUNNING'): return Poll('running')
         raise ProviderError('Unknown Wan status: '+str(status),
                             kind='unknown_remote', submission_state='confirmed')

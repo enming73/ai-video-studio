@@ -335,6 +335,13 @@ class Provider(Protocol):
 
 这些是命名与分类的实现决定，不改变第 5 节的语义。
 
+补充安全约束：
+
+- 只有 `is_retryable(error)` 为真（`kind` 属于 `rate_limited`/`transient` 且 `submission_state='not_sent'`）才允许重试；`maybe_sent` 一律按未知提交处理。
+- `submit_video` 在发请求前校验模型、时长、分辨率、帧字节、MIME 与“末帧必须有首帧”；失败为 `invalid_request` 且不发起 HTTP。
+- 厂商 200 响应中的错误信封按错误文本归类为 auth、rate_limited、content_rejected、transient 或 invalid_request；未识别为 invalid_request。这是保守启发式，真实预检时再核对厂商代码。
+- 所有适配器错误与轮询错误文本都截断，不持久化完整响应体。
+
 ## 6. Worker、CLI 与渲染
 
 - 新增 `studio worker` 常驻进程；`studio web` 默认启动一个嵌入式 Worker 线程，使用同一持久化领取逻辑，方便现有本地工作流。
