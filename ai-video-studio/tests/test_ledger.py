@@ -102,3 +102,66 @@ def test_reservation_requires_positive_integer_with_price_version(project):
     with pytest.raises(ValueError):
         ledger.reserve(project, stage='video', provider='mock', model='mock',
                        amount_microusd=1, pricing_version='', run_id=run_id)
+
+
+def test_settle_replaces_reservation_in_committed(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    entry = reserve(project, 500_000, run_id)
+    ledger.settle(entry, 300_000, 'provider usage record')
+    assert ledger.committed(project) == 300_000
+    summary = ledger.summary(project)
+    assert summary['open_exposure_microusd'] == 0
+    assert summary['settled_microusd'] == 300_000
+
+
+def test_unknown_keeps_exposure(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    entry = reserve(project, 400_000, run_id)
+    ledger.mark_unknown(entry, 'request timed out')
+    assert ledger.committed(project) == 400_000
+    assert ledger.summary(project)['unknown_count'] == 1
+
+
+def test_release_requires_evidence_and_clears_exposure(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    entry = reserve(project, 400_000, run_id)
+    ledger.mark_unknown(entry)
+    with pytest.raises(ValueError, match='evidence'):
+        ledger.release(entry, '')
+    ledger.release(entry, 'dashboard shows no task')
+    assert ledger.committed(project) == 0
+
+
+def test_terminal_entry_cannot_be_transitioned_again(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    entry = reserve(project, 400_000, run_id)
+    ledger.settle(entry, 350_000, 'invoice')
+    with pytest.raises(ValueError, match='not transitionable'):
+        ledger.release(entry, 'late evidence')
+    with pytest.raises(ValueError, match='not transitionable'):
+        ledger.settle(entry, 1, 'again')
+
+
+def test_settle_rejects_negative_or_boolean_actual(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    entry = reserve(project, 400_000, run_id)
+    for bad in (-1, True):
+        with pytest.raises(ValueError):
+            ledger.settle(entry, bad, 'invoice')
+
+
+def test_summary_groups_by_stage(project):
+    run_id = ledger.open_run(project, 1_000_000)
+    video = reserve(project, 200_000, run_id, 'video')
+    image = reserve(project, 100_000, run_id, 'image')
+    tts = reserve(project, 50_000, run_id, 'tts')
+    ledger.settle(image, 80_000, 'invoice')
+    ledger.mark_unknown(tts)
+    summary = ledger.summary(project)
+    assert summary['settled_microusd'] == 80_000
+    assert summary['open_exposure_microusd'] == 250_000
+    assert summary['committed_microusd'] == 330_000
+    assert summary['by_stage']['video']['committed_microusd'] == 200_000
+    assert summary['by_stage']['image']['committed_microusd'] == 80_000
+    assert summary['by_stage']['tts']['unknown_count'] == 1
+

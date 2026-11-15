@@ -163,3 +163,87 @@ def committed(pid: str, run_id: str | None = None, db=None) -> int:
     finally:
         if db is None:
             conn.close()
+
+
+def _transition(conn, entry_id: str, allowed: tuple[str, ...], values: dict) -> None:
+    assignments = ','.join(f'{key}=?' for key in values)
+    placeholders = ','.join('?' for _ in allowed)
+    changed = conn.execute(
+        f'UPDATE cost_entries SET {assignments},updated=? '
+        f'WHERE id=? AND billing_status IN ({placeholders})',
+        (*values.values(), _now(), entry_id, *allowed)).rowcount
+    if changed != 1:
+        raise ValueError('Cost entry not transitionable')
+
+
+def settle(entry_id: str, actual_microusd: int, evidence: str, db=None) -> None:
+    if (isinstance(actual_microusd, bool) or not isinstance(actual_microusd, int)
+            or actual_microusd < 0):
+        raise ValueError('Actual amount must be a nonnegative integer')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('Settlement evidence is required')
+    with _transaction(db) as conn:
+        _transition(conn, entry_id, ('reserved', 'unknown'), {
+            'billing_status': 'settled',
+            'actual_microusd': actual_microusd,
+            'evidence': evidence,
+        })
+
+
+def mark_unknown(entry_id: str, evidence: str | None = None, db=None) -> None:
+    if evidence is not None and (not isinstance(evidence, str) or not evidence.strip()):
+        raise ValueError('Evidence must be nonempty when provided')
+    with _transaction(db) as conn:
+        values = {'billing_status': 'unknown'}
+        if evidence is not None:
+            values['evidence'] = evidence
+        _transition(conn, entry_id, ('reserved',), values)
+
+
+def release(entry_id: str, evidence: str, db=None) -> None:
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('Release evidence is required')
+    with _transaction(db) as conn:
+        _transition(conn, entry_id, ('reserved', 'unknown'), {
+            'billing_status': 'released', 'evidence': evidence})
+
+
+def summary(pid: str, run_id: str | None = None, db=None) -> dict:
+    conn = db or core.connect()
+    try:
+        sql = ('SELECT stage,billing_status,COUNT(*) AS count,'
+               'COALESCE(SUM(CASE WHEN billing_status=\'settled\' THEN actual_microusd '
+               'ELSE 0 END),0) AS settled,'
+               'COALESCE(SUM(CASE WHEN billing_status IN (\'reserved\',\'unknown\') '
+               'THEN reserved_microusd ELSE 0 END),0) AS open,'
+               'COALESCE(SUM(CASE WHEN billing_status=\'unknown\' THEN 1 ELSE 0 END),0) '
+               'AS unknown_count FROM cost_entries WHERE project_id=?')
+        args = [pid]
+        if run_id is not None:
+            sql += ' AND run_id=?'
+            args.append(run_id)
+        rows = conn.execute(sql + ' GROUP BY stage,billing_status', args).fetchall()
+        by_stage: dict[str, dict] = {}
+        settled = open_exposure = unknown_count = 0
+        for row in rows:
+            stage = by_stage.setdefault(row['stage'], {
+                'settled_microusd': 0, 'open_exposure_microusd': 0,
+                'committed_microusd': 0, 'unknown_count': 0})
+            stage['settled_microusd'] += int(row['settled'])
+            stage['open_exposure_microusd'] += int(row['open'])
+            stage['committed_microusd'] += int(row['settled']) + int(row['open'])
+            stage['unknown_count'] += int(row['unknown_count'])
+            settled += int(row['settled'])
+            open_exposure += int(row['open'])
+            unknown_count += int(row['unknown_count'])
+        return {
+            'settled_microusd': settled,
+            'open_exposure_microusd': open_exposure,
+            'committed_microusd': settled + open_exposure,
+            'unknown_count': unknown_count,
+            'by_stage': by_stage,
+        }
+    finally:
+        if db is None:
+            conn.close()
+
