@@ -8,7 +8,7 @@
 
 **Spec:** [M1 可靠性设计](../specs/2026-11-15-m1-reliability-design.md) §6–§7；[Roadmap M1](../../../ROADMAP.md#m1--可恢复任务provider-契约与统一费用)。
 
-**Status:** 计划待批准；所有复选框未实施。仅覆盖 legacy 视频路径。
+**Status:** 已完成并待复审。仅覆盖 legacy 视频路径。
 
 ## Global Constraints
 
@@ -58,12 +58,12 @@
 - `run_forever(..., stop_event: threading.Event | None = None)`：新增参数；现有调用兼容。
 - FastAPI `startup` 启动嵌入式 Worker（可用 `STUDIO_DISABLE_EMBEDDED_WORKER=1` 关闭）；`shutdown` 停止。
 
-- [ ] 写 `test_embedded_worker_starts_once_and_stops`：两次 start 只有一线程；stop 后线程结束。
-- [ ] 写 `test_embedded_worker_processes_queued_job`：注册 fake handler，启动后 Job 变为 SUCCEEDED。
-- [ ] 写 `test_disable_embedded_worker_env`：设置环境变量后不启动。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_job_web.py -q`，确认失败。
-- [ ] 实现可停止循环与启动器；异常写入事件而不是静默退出。
-- [ ] 重跑通过；提交：`feat: add embedded worker lifecycle`。
+- [x] 写 `test_embedded_worker_starts_once_and_stops`：两次 start 只有一线程；stop 后线程结束。
+- [x] 写 `test_embedded_worker_processes_queued_job`：注册 fake handler，启动后 Job 变为 SUCCEEDED。
+- [x] 写 `test_disable_embedded_worker_env`：设置环境变量后不启动。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_job_web.py -q`，确认失败。
+- [x] 实现可停止循环与启动器；异常写入事件而不是静默退出。
+- [x] 重跑通过；提交：`feat: add embedded worker lifecycle`。
 
 ## Task 2：视频 Job 入队、等待与镜头回写
 
@@ -89,13 +89,13 @@
   - 幂等：重复 reconcile 不重复注册；同一内容哈希由 timeline 去重。
 - 只有 `provider != 'mock'` 且 live 时创建付费 Job；mock 仍走现有路径。
 
-- [ ] 写 `test_enqueue_is_idempotent_per_request_key`：同 key 两次返回同一 run 与同一组 Job。
-- [ ] 写 `test_enqueue_rejects_unresolved_job_for_same_shot`。
-- [ ] 写 `test_completed_job_updates_shot`：fake worker/manual set_status → reconcile → shot COMPLETED/file、asset 注册。
-- [ ] 写 `test_reconcile_is_idempotent`。
-- [ ] 更新 `tests/test_migrations.py` 的版本期望为 [1,2,3,4]，迁移数 4。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: enqueue and reconcile video jobs`。
+- [x] 写 `test_enqueue_is_idempotent_per_request_key`：同 key 两次返回同一 run 与同一组 Job。
+- [x] 写 `test_enqueue_rejects_unresolved_job_for_same_shot`。
+- [x] 写 `test_completed_job_updates_shot`：fake worker/manual set_status → reconcile → shot COMPLETED/file、asset 注册。
+- [x] 写 `test_reconcile_is_idempotent`。
+- [x] 更新 `tests/test_migrations.py` 的版本期望为 [1,2,3,4]，迁移数 4。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: enqueue and reconcile video jobs`。
 
 ## Task 3：Legacy 生成与 API 生产入口
 
@@ -116,12 +116,12 @@
   - 查询前调用 `job_runner.reconcile(pid)`，保证完成输出回写。
 - `core.status`：附加 `jobs` 摘要（状态、block_reason、费用）但不删除旧字段。
 
-- [ ] 写 `test_live_requires_budget_and_confirmation`：无确认/预算不足不创建 Job。
-- [ ] 写 `test_production_generate_creates_persistent_jobs`：mock provider 仍按旧路径；cloud 用 fake provider/worker 验证 Job。
-- [ ] 写 `test_production_status_survives_restart`：创建 Job，重新导入 app/新连接后 `GET` 仍返回。
-- [ ] 写 `test_dry_run_does_not_create_jobs`。
-- [ ] 运行定向测试确认失败；实现；重跑通过。
-- [ ] 提交：`feat: route legacy generation through jobs`。
+- [x] 写 `test_live_requires_budget_and_confirmation`：无确认/预算不足不创建 Job。
+- [x] 写 `test_production_generate_creates_persistent_jobs`：mock provider 仍按旧路径；cloud 用 fake provider/worker 验证 Job。
+- [x] 写 `test_production_status_survives_restart`：创建 Job，重新导入 app/新连接后 `GET` 仍返回。
+- [x] 写 `test_dry_run_does_not_create_jobs`。
+- [x] 运行定向测试确认失败；实现；重跑通过。
+- [x] 提交：`feat: route legacy generation through jobs`。
 
 ## Task 4：Job API、CLI 与回归
 
@@ -143,14 +143,14 @@ GET  /api/projects/{pid}/costs
 - CLI `studio generate --live` 使用 Job 服务；输出 Job ID 与最终摘要。
 - CLI `jobs/job/pause/resume/cancel` 已存在，补充 `--json` 稳定输出（可选）。
 
-- [ ] 写 `test_job_api_lists_and_gets`。
-- [ ] 写 `test_job_api_pause_resume_cancel`。
-- [ ] 写 `test_costs_endpoint_exposes_unknown_and_committed`。
-- [ ] 写 `test_cli_live_generate_creates_jobs`（fake provider，无付费）。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_job_web.py tests/test_job_runner.py -q`。
-- [ ] 运行完整 Studio 331 项与 VBench 8 项。
-- [ ] 更新 README：Worker/API/CLI 的 Job 流程与未知状态处理。
-- [ ] 提交：`feat: expose job api and costs`。
+- [x] 写 `test_job_api_lists_and_gets`。
+- [x] 写 `test_job_api_pause_resume_cancel`。
+- [x] 写 `test_costs_endpoint_exposes_unknown_and_committed`。
+- [x] 写 `test_cli_live_generate_creates_jobs`（fake provider，无付费）。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_job_web.py tests/test_job_runner.py -q`。
+- [x] 运行完整 Studio 331 项与 VBench 8 项。
+- [x] 更新 README：Worker/API/CLI 的 Job 流程与未知状态处理。
+- [x] 提交：`feat: expose job api and costs`。
 
 ## 自检结论与后续边界
 
