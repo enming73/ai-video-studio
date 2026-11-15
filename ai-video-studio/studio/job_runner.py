@@ -91,10 +91,6 @@ def enqueue_shot(pid: str, seq: int, *, run_id: str, provider: str, model: str,
                            run_id=run_id, target_key=f'shot:{shot["id"]}', db=conn)
 
 
-class _null:
-    def __init__(self, db): self.db = db
-    def __enter__(self): return self.db
-    def __exit__(self, *args): return False
 
 
 def enqueue_project(pid: str, *, budget_usd: float, request_key: str, limit: int = 0,

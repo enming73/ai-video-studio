@@ -60,3 +60,87 @@ def test_disable_embedded_worker_env(monkeypatch):
     worker.stop_embedded()
     with TestClient(webapp.app):
         assert worker._embedded_thread is None
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from studio import webapp
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    monkeypatch.setenv('STUDIO_DISABLE_EMBEDDED_WORKER', '1')
+    return TestClient(webapp.app)
+
+
+def cloud_project(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    pid = core.create('Cloud project', 20, 'minimax', 5)
+    core.plan(pid, 10)
+    return pid
+
+
+def test_production_generate_creates_persistent_jobs(api, tmp_path, monkeypatch):
+    pid = cloud_project(tmp_path, monkeypatch)
+    response = api.post(f'/api/projects/{pid}/production/generate', json={
+        'live': True, 'budget': 5, 'confirm_paid': True,
+        'confirmation_project_id': pid, 'limit': 0})
+    assert response.status_code == 202, response.text
+    data = response.json()
+    assert data['status'] == 'queued'
+    assert len(data['job_ids']) == 2
+    assert len(jobs.list_for_project(pid)) == 2
+
+
+def test_dry_run_does_not_create_jobs(api, tmp_path, monkeypatch):
+    pid = cloud_project(tmp_path, monkeypatch)
+    response = api.post(f'/api/projects/{pid}/production/generate', json={
+        'live': False, 'budget': 5})
+    assert response.status_code == 202
+    assert jobs.list_for_project(pid) == []
+
+
+def test_production_status_survives_restart(api, tmp_path, monkeypatch):
+    pid = cloud_project(tmp_path, monkeypatch)
+    created = api.post(f'/api/projects/{pid}/production/generate', json={
+        'live': True, 'budget': 5, 'confirm_paid': True,
+        'confirmation_project_id': pid}).json()
+    run_id = created['run_id']
+    status = api.get(f'/api/projects/{pid}/production/jobs/{run_id}')
+    assert status.status_code == 200
+    assert status.json()['run_id'] == run_id
+    assert len(status.json()['jobs']) == 2
+
+
+def make_job(pid, run_id, key='api'):
+    return jobs.create(pid, kind='video', payload={}, request_key=key, run_id=run_id)
+
+
+def test_job_api_lists_and_gets(api, project):
+    pid, run_id = project
+    job = make_job(pid, run_id)
+    listed = api.get(f'/api/projects/{pid}/jobs')
+    assert listed.status_code == 200
+    assert listed.json()[0]['id'] == job['id']
+    detail = api.get(f"/api/jobs/{job['id']}")
+    assert detail.status_code == 200
+    assert detail.json()['attempts'] == []
+    assert api.get('/api/jobs/unknown').status_code == 404
+
+
+def test_job_api_pause_resume_cancel(api, project):
+    pid, run_id = project
+    job = make_job(pid, run_id, 'control')
+    assert api.post(f"/api/jobs/{job['id']}/pause").json()['status'] == 'PAUSED'
+    assert api.post(f"/api/jobs/{job['id']}/resume").json()['status'] == 'PENDING'
+    assert api.post(f"/api/jobs/{job['id']}/cancel").json()['status'] == 'CANCELLED'
+    assert api.post(f"/api/jobs/{job['id']}/pause").status_code == 409
+
+
+def test_costs_endpoint_exposes_unknown_and_committed(api, project):
+    pid, run_id = project
+    ledger.reserve(pid, stage='video', provider='fake', model='m',
+                   amount_microusd=100_000, pricing_version='v1', run_id=run_id)
+    data = api.get(f'/api/projects/{pid}/costs').json()
+    assert data['committed_microusd'] == 100_000
+    assert data['open_exposure_microusd'] == 100_000
+    assert 'not a provider invoice' in data['note']
