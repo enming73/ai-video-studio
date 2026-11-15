@@ -107,12 +107,14 @@ The 2026-11-15 baseline assessment ran Studio tests (183 passed), VBench tests
 (passed). These are historical results for that assessment, not evidence for
 future modifications or for a live paid/browser end-to-end production run.
 
-M0 implementation verification: 198 Studio tests passed (same existing
-Starlette/httpx warning). A clean-commit CLI run at `8b119c7` generated three
-60-second 720p exports in `/tmp/opencode/studio-m0-20261115-8b119c7`.
+M0 implementation verification: 201 Studio tests passed (same existing
+Starlette/httpx warning). A clean-commit CLI run at `cf508ca` generated three
+60-second 720p exports in `/tmp/opencode/studio-m0-20261115-cf508ca`.
 Original source hashes were preserved; only shot 3 was replaced and subsequent
-subtitle-only editing preserved decoded audio. The inputs are synthetic colors
-and tones; complete human viewing remains pending. See the evidence document.
+subtitle-only editing preserved decoded audio. Every export passed a full
+FFmpeg decode and its render manifest was checked against the selected asset.
+The inputs are synthetic colors and tones; the user accepted M0 on 2026-11-15
+within its documented scope. See the evidence document.
 
 Before further paid testing, verify provider access, rates, image handling,
 budget reservations and outstanding remote tasks. Back up the local SQLite
