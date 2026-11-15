@@ -47,6 +47,12 @@ def _request(job: dict, payload: dict, root: Path) -> VideoRequest:
                                payload.get('first_mime'))
     last, last_mime = _frame(root, payload.get('last_frame_path'),
                              payload.get('last_mime'))
+    for label, data, expected in (
+            ('first', first, payload.get('first_frame_sha256')),
+            ('last', last, payload.get('last_frame_sha256'))):
+        if data is not None and expected is not None \
+                and hashlib.sha256(data).hexdigest() != expected:
+            raise ValueError(f'Confirmed {label} boundary frame changed')
     return VideoRequest(
         prompt=payload['prompt'], duration_sec=payload['duration_sec'],
         width=payload['width'], height=payload['height'],

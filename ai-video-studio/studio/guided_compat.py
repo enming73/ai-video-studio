@@ -133,6 +133,8 @@ def asset_provenance(db, pid, shot_id, asset_id):
     if not row:
         return None
     payload = json.loads(row['payload_json'])
+    if not payload.get('first_frame_id'):
+        return None
     return {'frame_id': payload.get('first_frame_id'),
             'frame_sha256': payload.get('first_frame_sha256'),
             'last_frame_id': payload.get('last_frame_id'),

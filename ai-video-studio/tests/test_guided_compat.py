@@ -112,3 +112,32 @@ def test_projection_includes_cost_and_output(guided_job, billing, expected):
     assert result['video_url'] == 'https://example.test/video'
     assert result['file'] == str(target)
     assert result['asset_id'] == asset
+
+
+def test_text_only_job_has_no_frame_provenance(guided_job):
+    pid = guided_job['project_id']
+    target = core.HOME / pid / 'text-only.mp4'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'video')
+    asset = timeline.import_asset(pid, 1, target, source='job:' + guided_job['id'])
+    with core.connect() as db:
+        assert compat.asset_provenance(db, pid, json.loads(guided_job['payload_json'])['shot_id'], asset) is None
+
+
+def test_generic_reconcile_uses_original_guided_shot_id(guided_job):
+    from studio import job_runner
+    pid = guided_job['project_id']
+    target = core.HOME / pid / 'original-shot.mp4'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'video')
+    original_shot_id = json.loads(guided_job['payload_json'])['shot_id']
+    with core.connect() as db:
+        db.execute('UPDATE shots SET seq=2 WHERE id=?', (original_shot_id,))
+        db.execute("INSERT INTO shots(id,project_id,seq,prompt,duration,status) VALUES (?,?,?,?,?,?)",
+                   ('replacement', pid, 1, 'New shot', 10, 'PLANNED'))
+        db.execute("UPDATE jobs SET status='SUCCEEDED',output_json=? WHERE id=?",
+                   (json.dumps({'file': str(target)}), guided_job['id']))
+    job_runner.reconcile(pid)
+    assert timeline.assets(pid, 1) == []
+    assert len(timeline.assets(pid, 2)) == 1
+    assert timeline.assets(pid, 2)[0]['shot_id'] == original_shot_id

@@ -157,9 +157,15 @@ def reconcile(pid: str, db=None) -> dict:
             continue
         payload = json.loads(job['payload_json'])
         output = json.loads(job['output_json'] or '{}')
-        shot_id, seq, file = payload.get('shot_id'), payload.get('seq'), output.get('file')
-        if not shot_id or not seq or not file or not Path(file).is_file():
+        shot_id, file = payload.get('shot_id'), output.get('file')
+        if not shot_id or not file or not Path(file).is_file():
             continue
+        with _conn(db) as conn:
+            shot = conn.execute('SELECT id,seq FROM shots WHERE project_id=? AND id=?',
+                                (pid, shot_id)).fetchone()
+        if shot is None:
+            continue
+        seq = shot['seq']
         asset = timeline.import_asset(pid, seq, file, source='job:' + job['id'])
         with _tx(db) as conn:
             conn.execute("UPDATE shots SET status='COMPLETED',file=?,error=NULL WHERE id=?",

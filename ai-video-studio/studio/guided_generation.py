@@ -284,11 +284,11 @@ def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mi
 
 
 def _existing_job(db, pid, shot_id, request_id):
-    row = db.execute('SELECT * FROM jobs WHERE project_id=? AND request_key=?',
-                     (pid, 'guided:' + request_id)).fetchone()
+    row = _request_job(db, pid, request_id)
     if row is not None:
         if json.loads(row['payload_json']).get('shot_id') != shot_id:
             raise ValueError('Request id belongs to another shot')
+        _remember_alias(db, row, request_id)
         return guided_compat.project_job(dict(row), db=db)
     row = db.execute(
         "SELECT * FROM jobs WHERE project_id=? AND target_key=? "
@@ -297,7 +297,30 @@ def _existing_job(db, pid, shot_id, request_id):
     if row is not None:
         if 'guided_request_id' not in json.loads(row['payload_json']):
             raise ValueError('An earlier non-Guided job is unresolved')
+        _remember_alias(db, row, request_id)
         return guided_compat.project_job(dict(row), db=db)
+
+
+def _request_job(db, pid, request_id):
+    row = db.execute('SELECT * FROM jobs WHERE project_id=? AND request_key=?',
+                     (pid, 'guided:' + request_id)).fetchone()
+    if row is not None:
+        return row
+    return db.execute(
+        "SELECT j.* FROM jobs j JOIN job_events e ON e.job_id=j.id "
+        "WHERE j.project_id=? AND e.type='guided_request_alias' "
+        "AND json_extract(e.data_json,'$.request_id')=? "
+        'ORDER BY j.created DESC LIMIT 1', (pid, request_id)).fetchone()
+
+
+def _remember_alias(db, job, request_id):
+    if request_id == json.loads(job['payload_json']).get('guided_request_id'):
+        return
+    exists = db.execute(
+        "SELECT 1 FROM job_events WHERE job_id=? AND type='guided_request_alias' "
+        "AND json_extract(data_json,'$.request_id')=?", (job['id'], request_id)).fetchone()
+    if not exists:
+        jobs.append_event(job['id'], 'guided_request_alias', {'request_id': request_id}, db=db)
 
 
 def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request_id: str) -> dict:

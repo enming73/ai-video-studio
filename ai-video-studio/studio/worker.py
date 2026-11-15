@@ -102,6 +102,9 @@ def run_once(owner: str | None = None, *, lease_seconds: int = 60,
                 if lease_lost.is_set():
                     raise jobs.LeaseLost('Worker no longer owns the job')
                 jobs.set_status(job_id, 'SUCCEEDED', output=result or {}, owner=owner)
+                if payload.get('guided_request_id'):
+                    from . import guided_compat
+                    guided_compat.reconcile_outputs(job['project_id'])
     except jobs.LeaseLost:
         jobs.append_event(job_id, 'lease_lost', {'owner': owner})
     except JobStopped as stop:

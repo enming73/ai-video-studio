@@ -257,6 +257,24 @@ def test_submit_is_idempotent_by_request_id(project, monkeypatch):
     assert replay['status'] == 'COMPLETED'
 
 
+def test_reused_request_id_stays_idempotent_after_completion(project, monkeypatch):
+    pid, _ = project
+    with core.connect() as db:
+        db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    first = generation.submit(pid, 1, 2, confirm_paid=True, request_id='original')
+    duplicate = generation.submit(pid, 1, 2, confirm_paid=True, request_id='second-click')
+    assert duplicate['id'] == first['id']
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='SUCCEEDED' WHERE id=?", (first['id'],))
+    replay = generation.submit(pid, 1, 2, confirm_paid=True, request_id='second-click')
+    assert replay['id'] == first['id']
+    with pytest.raises(ValueError, match='another shot'):
+        generation.submit(pid, 2, 2, confirm_paid=True, request_id='second-click')
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+
+
 def test_mock_submit_still_completes_synchronously(project):
     pid, _ = project
     result = generation.submit(pid, 1, 0, confirm_paid=False, request_id='mock-sync')
@@ -268,7 +286,9 @@ def test_mock_submit_still_completes_synchronously(project):
 
 
 def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatch):
-    from studio import guided_compat, jobs
+    from studio import jobs, worker
+    from studio.handlers import video
+    from video_provider_core import CostEstimate, RemoteJob, RemoteStatus
     pid, state = boundary_project
     with core.connect() as db:
         db.execute('UPDATE projects SET budget=5 WHERE id=?', (pid,))
@@ -277,12 +297,22 @@ def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatc
     state = confirm_pair(pid, workflow.get(pid), 0, 1)
     result = generation.submit(pid, 1, 1, confirm_paid=True, request_id='provenance')
     job = jobs.get(result['id'])
-    target = core.HOME / pid / 'completed.mp4'
-    target.write_bytes(b'completed')
-    with core.connect() as db:
-        db.execute("UPDATE jobs SET status='SUCCEEDED',output_json=? WHERE id=?",
-                   (json.dumps({'file': str(target)}), job['id']))
-    guided_compat.reconcile_outputs(pid)
+    class Provider:
+        def __init__(self, client): pass
+        def estimate_cost(self, request):
+            return CostEstimate(800_000, 'test:v1', 'test')
+        def submit_video(self, request, key):
+            assert request.first_frame and request.last_frame
+            return RemoteJob('minimax', 'known')
+        def status(self, remote, *, model=None):
+            return RemoteStatus('succeeded', url='https://example.test/video')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    monkeypatch.setitem(worker.HANDLERS, 'video', video)
+    monkeypatch.setattr(video, 'download', lambda client, url, target: target.write_bytes(b'completed'))
+    monkeypatch.setattr(core, 'verify_video', lambda target, duration: None)
+    assert worker.run_once() == job['id']
+    # /assets can race /attempts in React: completion must already register output.
+    assert len(timeline.assets(pid, 1)) == 1
     result = generation.attempt(pid, result['id'])
     timeline.select(pid, 1, result['asset_id'])
     shot = workflow.get(pid)['shots'][0]
@@ -291,6 +321,23 @@ def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatc
     new_version = add_version(pid, state['boundaries'][0]['id'], 'new', size='1536x864')
     boundaries.confirm(pid, state['boundaries'][0]['id'], new_version, workflow.get(pid)['revision'])
     assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
+
+
+def test_worker_rejects_changed_confirmed_boundary(boundary_project, monkeypatch):
+    from studio import jobs
+    from studio.handlers import video
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=5 WHERE id=?', (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    generation.set_video_model(pid, 'minimax', 'MiniMax-H3', state['revision'])
+    confirm_pair(pid, workflow.get(pid), 0, 1)
+    result = generation.submit(pid, 1, 1, confirm_paid=True, request_id='immutable')
+    job = jobs.get(result['id'])
+    payload = json.loads(job['payload_json'])
+    Path(payload['first_frame_path']).write_bytes(b'replaced since authorization')
+    with pytest.raises(ValueError, match='boundary.*changed'):
+        video._request(job, payload, core.HOME / pid)
 
 
 def test_minimax_rejects_undersized_boundary_frame(boundary_project, monkeypatch):
