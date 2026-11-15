@@ -10,7 +10,7 @@
 
 **Spec:** [M1 可靠性设计](../specs/2026-11-15-m1-reliability-design.md)；[Roadmap M1](../../../ROADMAP.md#m1--可恢复任务provider-契约与统一费用)。
 
-**Status:** 计划待批准；所有复选框未实施。本计划只覆盖 M1-A，不实现 Worker、Provider 契约或入口迁移。
+**Status:** 已完成并待复审。本计划只覆盖 M1-A，不实现 Worker、Provider 契约或入口迁移。
 
 ## Global Constraints
 
@@ -66,16 +66,16 @@
 
 Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE TABLE IF NOT EXISTS sample(id TEXT PRIMARY KEY);`），不依赖 Task 2 的真实迁移，确保 runner 可单独验收。
 
-- [ ] 写 `test_fresh_database_records_applied_versions`：临时库应用测试迁移，`schema_migrations` 有版本、名称、checksum。
-- [ ] 写 `test_second_apply_does_not_reapply`：第二次 `apply` 返回空列表，版本记录数不变。
-- [ ] 写 `test_changed_checksum_blocks_startup`：写入记录后修改迁移文件字节，`pending` 抛 `RuntimeError`，信息含版本号。
-- [ ] 写 `test_empty_database_is_not_backed_up`：新库首次应用不创建 `backups/` 文件。
-- [ ] 写 `test_existing_database_is_backed_up_before_migration`：用 raw sqlite3 建 `projects(id)` 并插入一行，应用后备份存在且 `quick_check=ok`，原库版本已记录。
-- [ ] 写 `test_backup_failure_aborts_before_schema_change`：monkeypatch `backup_database` 抛 `OSError`；断言迁移未应用、旧表数据未变。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_migrations.py -q`，确认接口缺失失败。
-- [ ] 实现发现、checksum、备份与应用；备份失败直接抛出，不继续执行 SQL。
-- [ ] 重跑定向测试至通过。
-- [ ] 提交：`feat: add versioned sqlite migrations with backups`。
+- [x] 写 `test_fresh_database_records_applied_versions`：临时库应用测试迁移，`schema_migrations` 有版本、名称、checksum。
+- [x] 写 `test_second_apply_does_not_reapply`：第二次 `apply` 返回空列表，版本记录数不变。
+- [x] 写 `test_changed_checksum_blocks_startup`：写入记录后修改迁移文件字节，`pending` 抛 `RuntimeError`，信息含版本号。
+- [x] 写 `test_empty_database_is_not_backed_up`：新库首次应用不创建 `backups/` 文件。
+- [x] 写 `test_existing_database_is_backed_up_before_migration`：用 raw sqlite3 建 `projects(id)` 并插入一行，应用后备份存在且 `quick_check=ok`，原库版本已记录。
+- [x] 写 `test_backup_failure_aborts_before_schema_change`：monkeypatch `backup_database` 抛 `OSError`；断言迁移未应用、旧表数据未变。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_migrations.py -q`，确认接口缺失失败。
+- [x] 实现发现、checksum、备份与应用；备份失败直接抛出，不继续执行 SQL。
+- [x] 重跑定向测试至通过。
+- [x] 提交：`feat: add versioned sqlite migrations with backups`。
 
 **Notes:** 备份只在“库已存在且有待应用迁移”时执行；新库没有可丢失数据。SQL migration 在自身脚本内负责 DDL；runner 在成功后 `INSERT OR IGNORE` 版本记录，因此崩溃后重跑必须仍然幂等。
 
@@ -95,14 +95,14 @@ Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE
 - `cost_entries(... UNIQUE(attempt_id, stage), legacy_key TEXT UNIQUE)`
 - 索引：`jobs(status, priority, created)`、`job_attempts(job_id)`、`cost_entries(project_id, run_id)`。
 
-- [ ] 写 `test_foundation_tables_and_columns_exist`：应用迁移后逐表检查必需列。
-- [ ] 写 `test_duplicate_job_request_key_is_rejected`：同项目同 `request_key` 第二次插入抛 `sqlite3.IntegrityError`；不同项目可相同 key。
-- [ ] 写 `test_duplicate_active_attempt_fingerprint_is_rejected`：同 Job 两个未决同指纹 attempt 插入失败；一个进入 `FAILED_RETRYABLE` 后允许新 attempt。
-- [ ] 写 `test_duplicate_cost_entry_per_attempt_stage_is_rejected`；`legacy_key` 也不能重复。
-- [ ] 运行定向测试确认失败。
-- [ ] 编写幂等 SQL 迁移并让 Task 1 runner 应用。
-- [ ] 重跑 `tests/test_migrations.py` 至通过。
-- [ ] 提交：`feat: add m1 job and cost schema`。
+- [x] 写 `test_foundation_tables_and_columns_exist`：应用迁移后逐表检查必需列。
+- [x] 写 `test_duplicate_job_request_key_is_rejected`：同项目同 `request_key` 第二次插入抛 `sqlite3.IntegrityError`；不同项目可相同 key。
+- [x] 写 `test_duplicate_active_attempt_fingerprint_is_rejected`：同 Job 两个未决同指纹 attempt 插入失败；一个进入 `FAILED_RETRYABLE` 后允许新 attempt。
+- [x] 写 `test_duplicate_cost_entry_per_attempt_stage_is_rejected`；`legacy_key` 也不能重复。
+- [x] 运行定向测试确认失败。
+- [x] 编写幂等 SQL 迁移并让 Task 1 runner 应用。
+- [x] 重跑 `tests/test_migrations.py` 至通过。
+- [x] 提交：`feat: add m1 job and cost schema`。
 
 ## Task 3：账本预留与预算门槛
 
@@ -121,16 +121,16 @@ Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE
 
 `reserve` 规则：`amount_microusd` 必须为正整数；`pricing_version` 非空；run 必须存在且 `OPEN`；在 `BEGIN IMMEDIATE` 内计算 project/run committed 后插入 `billing_status='reserved'`。
 
-- [ ] 写 `test_money_conversion_is_exact_and_rejects_invalid`：`to_micro('0.1') == 100000`、`to_micro(1e-7) == 0`、拒绝 `True`、`float('nan')`、`-1`。
-- [ ] 写 `test_reserve_creates_reserved_entry`：金额、stage、pricing_version、状态正确。
-- [ ] 写 `test_project_budget_exceeded_is_atomic`：`project.budget=1`，先预留 0.6 再请求 0.5 抛 `BudgetExceeded(scope='project')`，费用行数仍为 1。
-- [ ] 写 `test_run_budget_is_enforced_independently`：项目额度充足、run 额度 0.5，请求 0.6 抛 `BudgetExceeded(scope='run')`。
-- [ ] 写 `test_closed_run_rejects_reservation`。
-- [ ] 写 `test_concurrent_reservations_do_not_overdraw`：项目额度 1 USD，8 个线程各预留 0.2 USD；恰好 5 个成功，最终 committed=1 USD，无负余额。
-- [ ] 运行定向测试确认失败。
-- [ ] 实现金额转换、run 与 `reserve`；使用独立连接时启用 `timeout=30` 与 WAL。
-- [ ] 重跑至通过。
-- [ ] 提交：`feat: add atomic cost reservations`。
+- [x] 写 `test_money_conversion_is_exact_and_rejects_invalid`：`to_micro('0.1') == 100000`、`to_micro(1e-7) == 0`、拒绝 `True`、`float('nan')`、`-1`。
+- [x] 写 `test_reserve_creates_reserved_entry`：金额、stage、pricing_version、状态正确。
+- [x] 写 `test_project_budget_exceeded_is_atomic`：`project.budget=1`，先预留 0.6 再请求 0.5 抛 `BudgetExceeded(scope='project')`，费用行数仍为 1。
+- [x] 写 `test_run_budget_is_enforced_independently`：项目额度充足、run 额度 0.5，请求 0.6 抛 `BudgetExceeded(scope='run')`。
+- [x] 写 `test_closed_run_rejects_reservation`。
+- [x] 写 `test_concurrent_reservations_do_not_overdraw`：项目额度 1 USD，8 个线程各预留 0.2 USD；恰好 5 个成功，最终 committed=1 USD，无负余额。
+- [x] 运行定向测试确认失败。
+- [x] 实现金额转换、run 与 `reserve`；使用独立连接时启用 `timeout=30` 与 WAL。
+- [x] 重跑至通过。
+- [x] 提交：`feat: add atomic cost reservations`。
 
 **Notes:** `projects.budget` 仍是 REAL；读取后转微美元。不要修改 `projects` 表。`db` 参数用于测试或未来 Job 事务；传入时不得嵌套 `BEGIN`，由调用方保证事务边界。
 
@@ -146,15 +146,15 @@ Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE
 - `summary(pid: str, run_id: str|None = None, db=None) -> dict`：返回 `settled_microusd`、`open_exposure_microusd`、`committed_microusd`、`unknown_count`、`by_stage`。
 - `committed` 与 `summary` 使用同一 SQL 定义，避免展示与门槛不一致。
 
-- [ ] 写 `test_settle_replaces_reservation_in_committed`：预留 0.5 → 结算 0.3，committed=0.3，open=0。
-- [ ] 写 `test_unknown_keeps_exposure`：`mark_unknown` 后 committed 不变，`unknown_count=1`。
-- [ ] 写 `test_release_requires_evidence_and_clears_exposure`：无证据抛 `ValueError`；有证据后 committed=0。
-- [ ] 写 `test_terminal_entry_cannot_be_transitioned_again`：已结算条目再次释放抛 `ValueError`。
-- [ ] 写 `test_summary_groups_by_stage`：video/image/tts 各自金额正确。
-- [ ] 运行定向测试确认失败。
-- [ ] 实现转换与汇总；所有状态转换使用单条带 `WHERE billing_status IN (...)` 的 UPDATE，检查 `rowcount==1`。
-- [ ] 重跑至通过。
-- [ ] 提交：`feat: add cost settlement and exposure summary`。
+- [x] 写 `test_settle_replaces_reservation_in_committed`：预留 0.5 → 结算 0.3，committed=0.3，open=0。
+- [x] 写 `test_unknown_keeps_exposure`：`mark_unknown` 后 committed 不变，`unknown_count=1`。
+- [x] 写 `test_release_requires_evidence_and_clears_exposure`：无证据抛 `ValueError`；有证据后 committed=0。
+- [x] 写 `test_terminal_entry_cannot_be_transitioned_again`：已结算条目再次释放抛 `ValueError`。
+- [x] 写 `test_summary_groups_by_stage`：video/image/tts 各自金额正确。
+- [x] 运行定向测试确认失败。
+- [x] 实现转换与汇总；所有状态转换使用单条带 `WHERE billing_status IN (...)` 的 UPDATE，检查 `rowcount==1`。
+- [x] 重跑至通过。
+- [x] 提交：`feat: add cost settlement and exposure summary`。
 
 ## Task 5：历史预留一次性回填
 
@@ -171,15 +171,15 @@ Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE
 - 使用 `INSERT OR IGNORE`/存在检查保证重复应用不重复计费。
 - 表不存在时跳过，便于全新库。
 
-- [ ] 写 `test_legacy_amounts_count_once`：旧库含两条预留，应用两次后费用行仍为两条，committed 正确。
-- [ ] 写 `test_guided_attempt_takes_precedence_over_shot_amount`：同一 shot 同时有 shot 预留与 guided attempt，只生成 guided 行。
-- [ ] 写 `test_legacy_ceilings_are_not_migrated_as_spend`：只插入 image/planning/prompt 的 budget 字段，不产生费用行。
-- [ ] 写 `test_legacy_over_budget_blocks_new_reservation`：项目预算 1，历史 unknown 1.5；打开新的 RUN（历史 legacy run 已 CLOSED）后预留 0.1，抛 `BudgetExceeded(scope='project')`。
-- [ ] 写 `test_missing_legacy_tables_are_skipped`：只有 `schema_migrations` 时 `apply` 不报错。
-- [ ] 运行定向测试确认失败。
-- [ ] 实现 002；所有插入与项目 run 创建在同一事务。
-- [ ] 重跑至通过。
-- [ ] 提交：`feat: backfill legacy reserved costs once`。
+- [x] 写 `test_legacy_amounts_count_once`：旧库含两条预留，应用两次后费用行仍为两条，committed 正确。
+- [x] 写 `test_guided_attempt_takes_precedence_over_shot_amount`：同一 shot 同时有 shot 预留与 guided attempt，只生成 guided 行。
+- [x] 写 `test_legacy_ceilings_are_not_migrated_as_spend`：只插入 image/planning/prompt 的 budget 字段，不产生费用行。
+- [x] 写 `test_legacy_over_budget_blocks_new_reservation`：项目预算 1，历史 unknown 1.5；打开新的 RUN（历史 legacy run 已 CLOSED）后预留 0.1，抛 `BudgetExceeded(scope='project')`。
+- [x] 写 `test_missing_legacy_tables_are_skipped`：只有 `schema_migrations` 时 `apply` 不报错。
+- [x] 运行定向测试确认失败。
+- [x] 实现 002；所有插入与项目 run 创建在同一事务。
+- [x] 重跑至通过。
+- [x] 提交：`feat: backfill legacy reserved costs once`。
 
 ## Task 6：接入 `core.connect()` 与回归
 
@@ -193,13 +193,13 @@ Task 1 的测试在 `tmp_path/mlocal` 创建独立的 `001_sample.sql`（`CREATE
 4. 调用 `migrations.apply(..., backup=False)`。
 5. 失败时关闭连接并抛出；不得吞掉备份或迁移错误。
 
-- [ ] 写 `test_connect_applies_migrations_to_new_database`：patch `HOME`，调用 `core.connect()`，`schema_migrations` 有版本。
-- [ ] 写 `test_connect_migrates_existing_database_once`：用 raw sqlite3 建最小旧库（`projects`、`shots`、`guided_attempts` 及一行历史预留），调用 `core.connect()` 两次；第二次不新增迁移记录，历史费用行数不变、金额只计一次。
-- [ ] 写 `test_connect_creates_backup_before_upgrading_existing_database`：旧库含项目，升级后有 `backups/pre-m1-*.sqlite3`，备份可查询。
-- [ ] 运行 `uv run --extra dev --extra web pytest tests/test_migrations.py tests/test_ledger.py tests/test_legacy_costs.py -q`。
-- [ ] 运行完整 `uv run --extra dev --extra web pytest -q`；要求全部通过，仅保留既有 Starlette 警告。
-- [ ] 若完整套件暴露旧测试对新表的假设，修复测试或迁移兼容，不弱化断言。
-- [ ] 提交：`feat: apply m1 migrations on connect`。
+- [x] 写 `test_connect_applies_migrations_to_new_database`：patch `HOME`，调用 `core.connect()`，`schema_migrations` 有版本。
+- [x] 写 `test_connect_migrates_existing_database_once`：用 raw sqlite3 建最小旧库（`projects`、`shots`、`guided_attempts` 及一行历史预留），调用 `core.connect()` 两次；第二次不新增迁移记录，历史费用行数不变、金额只计一次。
+- [x] 写 `test_connect_creates_backup_before_upgrading_existing_database`：旧库含项目，升级后有 `backups/pre-m1-*.sqlite3`，备份可查询。
+- [x] 运行 `uv run --extra dev --extra web pytest tests/test_migrations.py tests/test_ledger.py tests/test_legacy_costs.py -q`。
+- [x] 运行完整 `uv run --extra dev --extra web pytest -q`；要求全部通过，仅保留既有 Starlette 警告。
+- [x] 若完整套件暴露旧测试对新表的假设，修复测试或迁移兼容，不弱化断言。
+- [x] 提交：`feat: apply m1 migrations on connect`。
 
 ## 自检结论与后续边界
 
