@@ -238,6 +238,28 @@ def test_attempt_api_merges_jobs_and_reconciles_output(api, monkeypatch):
     job = jobs.get(first['id'])
     attempt = attempts.create(job['id'], provider='minimax', model='MiniMax-H3',
                               input_data=json.loads(job['payload_json']))
+    attempts.prepare_submission(attempt['id'], amount_microusd=1_000_000, pricing_version='test:v1')
+    attempts.mark_unknown(attempt['id'], 'uncertain submission')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?", (job['id'],))
+    for action in ('recover', 'trim', 'abandon'):
+        rejected = api.post(base + '/attempts/' + attempt['id'] + '/' + action, json={})
+        assert rejected.status_code == 400
+        assert 'confirmation' in rejected.json()['detail']
+    # Explicitly confirmed recovery queries once, and never submits.
+    from studio.handlers import video
+    from video_provider_core import RemoteStatus
+    class Provider:
+        def __init__(self, client): pass
+        def submit_video(self, *args):
+            pytest.fail('Recovery must not submit')
+        def status(self, remote, *, model=None):
+            return RemoteStatus('running')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    recovered = api.post(base + '/attempts/' + attempt['id'] + '/recover',
+                         json={'remote_id': 'known', 'confirm_checked': True})
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()['status'] == 'SUBMITTED'
     target = core.HOME / pid / 'worker-result.mp4'
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b'generated')

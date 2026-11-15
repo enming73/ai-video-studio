@@ -83,6 +83,7 @@ class ShotEdit(Revision):
 
 class Recover(BaseModel):
     remote_id: str | None = None
+    confirm_checked: bool = False
 
 
 class AbandonAttempt(BaseModel):
@@ -432,12 +433,14 @@ def attempt(pid: str, attempt_id: str):
 
 @router.post('/attempts/{attempt_id}/recover')
 def recover(pid: str, attempt_id: str, body: Recover):
-    return call(guided_generation.recover, pid, attempt_id, body.remote_id)
+    return call(guided_generation.recover, pid, attempt_id, body.remote_id,
+                confirm_checked=body.confirm_checked)
 
 
 @router.post('/attempts/{attempt_id}/trim')
-def trim_attempt(pid: str, attempt_id: str):
-    return call(guided_generation.trim_pending, pid, attempt_id)
+def trim_attempt(pid: str, attempt_id: str, body: AbandonAttempt | None = None):
+    return call(guided_generation.trim_pending, pid, attempt_id,
+                confirm_checked=body.confirm_checked if body else False)
 
 
 @router.post('/attempts/{attempt_id}/abandon')

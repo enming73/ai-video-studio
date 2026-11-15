@@ -70,9 +70,11 @@ def _sleep(payload: dict):
         time.sleep(delay)
 
 
-def _finish(job, attempt, payload, provider, control, client):
+def _finish(job, attempt, payload, provider, control, client, *, poll_once=False):
     root = Path(core.HOME) / job['project_id']
-    if attempt['status'] in ('SUBMITTED', 'UNKNOWN_REMOTE_STATE'):
+    if attempt['status'] == 'UNKNOWN_REMOTE_STATE':
+        attempt = attempt_store.attach_remote(attempt['id'], attempt['remote_id'])
+    if attempt['status'] == 'SUBMITTED':
         attempt = attempt_store.mark_status(attempt['id'], 'POLLING')
     remote_id = attempt['remote_id']
     while True:
@@ -95,6 +97,8 @@ def _finish(job, attempt, payload, provider, control, client):
             raise RuntimeError(f'Provider status {status.state}')
         if status.state == 'succeeded':
             break
+        if poll_once:
+            return None
         _sleep(payload)
     if attempt['status'] in ('POLLING', 'SUBMITTED'):
         attempt_store.mark_status(attempt['id'], 'DOWNLOADING')
@@ -153,7 +157,7 @@ def execute(job, attempts, control):
         return _finish(job, attempt, payload, provider, control, client)
 
 
-def resume(job, attempt, control):
+def resume(job, attempt, control, *, poll_once=False):
     control.checkpoint(job['id'])
     payload = _payload(job)
     if not attempt or not attempt.get('remote_id'):
@@ -162,4 +166,4 @@ def resume(job, attempt, control):
     with httpx.Client(timeout=httpx.Timeout(40, connect=15),
                       follow_redirects=False) as client:
         provider = _provider(payload['provider'], client)
-        return _finish(job, attempt, payload, provider, control, client)
+        return _finish(job, attempt, payload, provider, control, client, poll_once=poll_once)

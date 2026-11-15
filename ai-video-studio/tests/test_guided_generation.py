@@ -363,3 +363,134 @@ def test_trim_rejects_video_shorter_than_current_shot(project):
         generation.trim_pending(pid, 'a'*32)
     assert generation.attempt(pid, 'a'*32)['status'] == 'DOWNLOAD_PENDING'
     assert timeline.assets(pid, 1) == []
+
+
+def _paid_attempt(project, monkeypatch, status='UNKNOWN_REMOTE_STATE'):
+    from studio import attempts, jobs
+    pid, _ = project
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    with core.connect() as db:
+        db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
+    queued = generation.submit(pid, 1, 2, confirm_paid=True, request_id='paid-action')
+    job = jobs.get(queued['id'])
+    attempt = attempts.create(job['id'], provider='minimax', model='MiniMax-H3',
+                              input_data=json.loads(job['payload_json']))
+    attempts.prepare_submission(attempt['id'], amount_microusd=1_000_000, pricing_version='test:v1')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?", (job['id'],))
+        db.execute('UPDATE job_attempts SET status=?,remote_id=? WHERE id=?',
+                   (status, None if status == 'UNKNOWN_REMOTE_STATE' else 'known', attempt['id']))
+    return jobs.get(job['id']), attempts.get(attempt['id'])
+
+
+@pytest.mark.parametrize('attach,known_unknown', [(True, False), (False, False), (False, True)])
+def test_recover_never_submits(project, monkeypatch, attach, known_unknown):
+    from studio import attempts, jobs
+    from studio.handlers import video
+    from video_provider_core import RemoteStatus
+    job, original = _paid_attempt(project, monkeypatch, 'UNKNOWN_REMOTE_STATE' if attach else 'SUBMITTED')
+    if known_unknown:
+        attempts.mark_unknown(original['id'], 'query timeout')
+    calls = {'submit': 0, 'query': 0}
+    class Provider:
+        def __init__(self, client): pass
+        def submit_video(self, *args):
+            calls['submit'] += 1
+            raise AssertionError('Recovery must not submit')
+        def status(self, remote, *, model=None):
+            calls['query'] += 1
+            assert remote.remote_id == 'known'
+            return RemoteStatus('running' if calls['query'] == 1 else 'succeeded',
+                                url='https://example.test/video')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    monkeypatch.setattr(video, 'download', lambda client, url, target: target.write_bytes(b'downloaded'))
+    first = generation.recover(job['project_id'], job['id'],
+                               'known' if attach else None, confirm_checked=True)
+    assert first['status'] == 'SUBMITTED'
+    assert calls == {'submit': 0, 'query': 1}
+    result = generation.recover(job['project_id'], original['id'], confirm_checked=True)
+    assert result['status'] == 'COMPLETED'
+    assert result['asset_id']
+    assert result['reserved_usd'] == 1
+    assert Path(result['file']).read_bytes() == b'downloaded'
+    assert calls == {'submit': 0, 'query': 2}
+    assert len(attempts.list_for_job(job['id'])) == 1
+    assert jobs.get(job['id'])['status'] == 'SUCCEEDED'
+    assert generation.recover(job['project_id'], original['id'], confirm_checked=True) == result
+
+
+def test_recover_requires_remote_and_respects_active_lease(project, monkeypatch):
+    from studio import jobs
+    job, original = _paid_attempt(project, monkeypatch)
+    with pytest.raises(ValueError, match='Remote'):
+        generation.recover(job['project_id'], original['id'], confirm_checked=True)
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='RUNNING',lease_owner='other',lease_expires='2999-01-01T00:00:00+00:00' WHERE id=?",
+                   (job['id'],))
+    with pytest.raises(ValueError, match='worker'):
+        generation.recover(job['project_id'], original['id'], 'known', confirm_checked=True)
+    assert jobs.latest_attempt(job['id'])['remote_id'] is None
+
+
+@pytest.mark.parametrize('status', ['UNKNOWN_REMOTE_STATE', 'DOWNLOADING', 'VALIDATING'])
+def test_abandon_unknown_attempt_keeps_reservation(project, monkeypatch, status):
+    from studio import jobs
+    job, original = _paid_attempt(project, monkeypatch, status)
+    with core.connect() as db:
+        costs = [dict(row) for row in db.execute('SELECT * FROM cost_entries')]
+    result = generation.abandon_pending(job['project_id'], original['id'], confirm_checked=True)
+    assert result['status'] == 'ABANDONED'
+    assert result['reserved_usd'] == 1
+    assert jobs.get(job['id'])['status'] == 'CANCELLED'
+    assert generation.abandon_pending(job['project_id'], original['id'], confirm_checked=True) == result
+    with core.connect() as db:
+        assert [dict(row) for row in db.execute('SELECT * FROM cost_entries')] == costs
+    new = generation.submit(job['project_id'], 1, 2, confirm_paid=True, request_id='after-abandon')
+    assert new['id'] != job['id']
+    assert new['status'] == 'QUEUED'
+
+
+def test_trim_preserves_original_and_reservation(project, monkeypatch):
+    import hashlib
+    from studio import attempts, jobs
+    job, original = _paid_attempt(project, monkeypatch, 'COMPLETED')
+    pid = job['project_id']
+    source = core.HOME / pid / 'original.mp4'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=size=64x64:rate=24',
+                    '-t', '8', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source)], check=True)
+    output = json.dumps({'file': str(source), 'remote_id': 'known'})
+    with core.connect() as db:
+        db.execute('UPDATE shots SET duration=6 WHERE project_id=? AND seq=1', (pid,))
+        db.execute("UPDATE jobs SET status='SUCCEEDED',output_json=? WHERE id=?", (output, job['id']))
+        db.execute('UPDATE job_attempts SET output_json=? WHERE id=?', (output, original['id']))
+        costs = [dict(row) for row in db.execute('SELECT * FROM cost_entries')]
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = generation.trim_pending(pid, original['id'], confirm_checked=True)
+    assert result['status'] == 'COMPLETED'
+    assert result['file'] != str(source)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    assert attempts.get(original['id'])['output_json'] == output
+    assert result['asset_id'] in [asset['id'] for asset in timeline.assets(pid, 1)]
+    duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                            '-of', 'default=nw=1:nk=1', result['file']], text=True))
+    assert abs(duration - 6) < 0.25
+    assert generation.trim_pending(pid, job['id'], confirm_checked=True) == result
+    with core.connect() as db:
+        assert [dict(row) for row in db.execute('SELECT * FROM cost_entries')] == costs
+    assert json.loads(jobs.get(job['id'])['output_json'])['original_file'] == str(source)
+
+
+def test_job_actions_require_explicit_confirmation(project, monkeypatch):
+    job, original = _paid_attempt(project, monkeypatch)
+    for action in (generation.recover, generation.trim_pending, generation.abandon_pending):
+        with pytest.raises(ValueError, match='confirmation'):
+            action(job['project_id'], original['id'], confirm_checked=False)
+
+
+def test_job_and_legacy_attempt_actions_both_work(project, monkeypatch):
+    job, original = _paid_attempt(project, monkeypatch)
+    _pending_attempt(*project)
+    pid = job['project_id']
+    assert generation.trim_pending(pid, 'a'*32)['status'] == 'COMPLETED'
+    assert generation.abandon_pending(pid, original['id'], confirm_checked=True)['status'] == 'ABANDONED'
