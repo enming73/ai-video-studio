@@ -1,8 +1,8 @@
 # AI Video Studio — Project Handoff
 Date: 2026-11-15
-Status: Product direction agreed; roadmap and M0 implementation plan drafted for
-review. Product implementation has not resumed under the new roadmap, and no
-delivery schedule or paid testing is authorized by these documents.
+Status: Roadmap approved; M0 local acceptance tooling implemented in an isolated
+worktree. Automated checks pass; human viewing/listening and milestone sign-off
+remain pending. No paid testing was performed or authorized.
 
 ## Goal
 Build a complete AI filmmaking studio: one-click complete draft → optional manual
@@ -19,8 +19,9 @@ normal automatic-draft runs should not require per-shot human confirmation.
 - [Development workflow](docs/development-workflow.md): scope control, testing,
   evidence, migration and milestone acceptance.
 - [M0 plan](docs/superpowers/plans/2026-11-15-m0-acceptance-baseline.md):
-  next proposed executable work. M0 verifies the existing local media workflow;
-  it is not a paid-provider or automatic-draft acceptance.
+  implementation record; [M0 evidence](docs/acceptance/m0-baseline.md) contains
+  commands, artifacts, failure-coverage inventory and the human acceptance checklist.
+  M0 verifies the existing local media workflow, not paid-provider or automatic-draft acceptance.
 
 Historical plans are context, not instructions to resume unfinished work.
 Review the current milestone before starting implementation.
@@ -94,8 +95,8 @@ For exact current commands/options always inspect `studio/cli.py` and version RE
 - Never claim browser/API end-to-end tests when only compile/ZIP tests ran.
 
 ## Current status and next steps
-The user has approved the product principle above and requested a durable roadmap
-and improved development process. The proposed next step is M0 after plan review,
+The user approved the roadmap and authorized M0 in an isolated worktree.
+The next step is human M0 acceptance, followed by a separately scoped M1 plan,
 not automatic continuation of historical release plans. The historical v0.9.5 ZIP
 was not user-verified; earlier verification claims are not a substitute for
 testing the current repository.
@@ -104,6 +105,13 @@ The 2026-11-15 baseline assessment ran Studio tests (183 passed), VBench tests
 (8 passed), frontend helper tests (5 passed) and the frontend production build
 (passed). These are historical results for that assessment, not evidence for
 future modifications or for a live paid/browser end-to-end production run.
+
+M0 implementation verification: 198 Studio tests passed (same existing
+Starlette/httpx warning). A clean-commit CLI run at `8b119c7` generated three
+60-second 720p exports in `/tmp/opencode/studio-m0-20261115-8b119c7`.
+Original source hashes were preserved; only shot 3 was replaced and subsequent
+subtitle-only editing preserved decoded audio. The inputs are synthetic colors
+and tones; complete human viewing remains pending. See the evidence document.
 
 Before further paid testing, verify provider access, rates, image handling,
 budget reservations and outstanding remote tasks. Back up the local SQLite

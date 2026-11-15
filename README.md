@@ -12,8 +12,9 @@ complete draft → optional manual refinement → targeted regeneration → reli
 export**. See [ROADMAP.md](ROADMAP.md) for the proposed milestones and acceptance
 gates, and [the development workflow](docs/development-workflow.md) for the
 implementation and verification process. The roadmap is planning guidance, not a
-claim that automatic production is already implemented. Implementation is awaiting
-plan review. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
+claim that automatic production is already implemented. The roadmap is approved;
+[M0 local acceptance tooling](docs/acceptance/m0-baseline.md) is implemented with
+automated evidence and pending human viewing/sign-off. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
 and verification limits.
 
 This repository contains Studio, VBench, and their shared provider core. The
