@@ -63,8 +63,8 @@ def open_or_reuse_run(pid: str, *, request_key: str, budget_microusd: int,
 
 
 def enqueue_shot(pid: str, seq: int, *, run_id: str, provider: str, model: str,
-                 request_key: str, max_attempts: int = 2, db=None) -> dict:
-    from .guided_storyboard import _MODELS
+                 request_key: str, max_attempts: int = 2,
+                 guided_input: dict | None = None, db=None) -> dict:
     with _tx(db) as conn:
         existing = conn.execute(
             'SELECT * FROM jobs WHERE project_id=? AND request_key=?',
@@ -87,6 +87,13 @@ def enqueue_shot(pid: str, seq: int, *, run_id: str, provider: str, model: str,
             'poll_interval_sec': 5, 'max_attempts': max_attempts,
             'shot_id': shot['id'], 'seq': seq,
         }
+        if guided_input is not None:
+            allowed = {'guided_request_id', 'first_frame_path', 'first_mime',
+                       'last_frame_path', 'last_mime', 'first_frame_id',
+                       'first_frame_sha256', 'last_frame_id', 'last_frame_sha256'}
+            if not guided_input.keys() <= allowed:
+                raise ValueError('Invalid Guided input')
+            payload.update(guided_input)
         return jobs.create(pid, kind='video', payload=payload, request_key=request_key,
                            run_id=run_id, target_key=f'shot:{shot["id"]}', db=conn)
 

@@ -1,8 +1,9 @@
 from pathlib import Path
+import json
 
 import pytest
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier
 import subprocess
 
 from studio import core, guided_boundaries as boundaries, guided_characters as characters, guided_generation as generation, guided_images as images, guided_workflow as workflow, provider_capabilities, timeline
@@ -152,6 +153,9 @@ def test_paid_authorization_required_before_submission(project, monkeypatch):
 
 
 def test_failed_submission_is_ambiguous_and_cannot_resubmit(project, monkeypatch):
+    from studio import jobs, worker
+    from studio.handlers import video
+    from video_provider_core import CostEstimate, ProviderError
     pid, _ = project
     with core.connect() as db:
         db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
@@ -159,14 +163,20 @@ def test_failed_submission_is_ambiguous_and_cannot_resubmit(project, monkeypatch
     calls = []
     class Provider:
         def __init__(self, client): pass
-        def submit(self, prompt, duration):
-            calls.append(prompt)
-            raise OSError('network uncertain')
-    monkeypatch.setitem(core.PROVIDERS, 'minimax', Provider)
+        def estimate_cost(self, request):
+            return CostEstimate(1_000_000, 'test:v1', 'test')
+        def submit_video(self, request, idempotency_key):
+            calls.append(request.prompt)
+            raise ProviderError('network uncertain', kind='unknown_remote', submission_state='maybe_sent')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    monkeypatch.setitem(worker.HANDLERS, 'video', video)
     state = generation.submit(pid, 1, 2, confirm_paid=True, request_id='ambiguous')
-    assert state['status'] == 'SUBMITTING'
-    with pytest.raises(ValueError):
-        generation.submit(pid, 1, 2, confirm_paid=True, request_id='different')
+    assert state['status'] == 'QUEUED'
+    worker.run_once()
+    assert jobs.get(state['id'])['block_reason'] == 'unknown_remote'
+    duplicate = generation.submit(pid, 1, 2, confirm_paid=True, request_id='different')
+    assert duplicate['status'] == 'SUBMITTING'
+    worker.run_once()
     assert len(calls) == 1
 
 
@@ -175,24 +185,16 @@ def test_concurrent_duplicate_request_submits_only_once(project, monkeypatch):
     with core.connect() as db:
         db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
     monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
-    entered, release = Event(), Event()
-    calls = []
-    class Provider:
-        def __init__(self, client): pass
-        def submit(self, prompt, duration):
-            calls.append(prompt)
-            entered.set()
-            assert release.wait(5)
-            return 'remote-1'
-    monkeypatch.setitem(core.PROVIDERS, 'minimax', Provider)
+    ready = Barrier(2)
+    def submit():
+        ready.wait(timeout=5)
+        return generation.submit(pid, 1, 2, confirm_paid=True, request_id='same')
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(generation.submit, pid, 1, 2, confirm_paid=True, request_id='same')
-        assert entered.wait(5)
-        duplicate = pool.submit(generation.submit, pid, 1, 2, confirm_paid=True, request_id='same').result(timeout=5)
-        assert duplicate['status'] == 'SUBMITTING'
-        release.set()
-        assert first.result(timeout=5)['status'] == 'SUBMITTED'
-    assert len(calls) == 1
+        first, second = pool.submit(submit), pool.submit(submit)
+        assert first.result(timeout=10) == second.result(timeout=10)
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM guided_attempts').fetchone()[0] == 0
 
 
 def test_mock_frame_video_produces_real_two_half_clip(boundary_project):
@@ -206,7 +208,7 @@ def test_mock_frame_video_produces_real_two_half_clip(boundary_project):
     core.verify_video(path, state['shots'][0]['duration'])
 
 
-def test_submit_passes_both_boundaries_to_i2v(boundary_project, monkeypatch):
+def test_paid_submit_creates_job_with_boundary_paths(boundary_project, monkeypatch):
     monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
     pid, state = boundary_project
     with core.connect() as db:
@@ -215,21 +217,54 @@ def test_submit_passes_both_boundaries_to_i2v(boundary_project, monkeypatch):
     state = confirm_pair(pid, state, 0, 1)
     first_bytes = images.image_path(pid, state['boundaries'][0]['confirmed_image_id']).read_bytes()
     last_bytes = images.image_path(pid, state['boundaries'][1]['confirmed_image_id']).read_bytes()
-    received = []
-    class FakeProvider:
-        def __init__(self, client): pass
-        def submit_i2v(self, prompt, duration, first_frame, first_mime, last_frame, last_mime):
-            received.append((prompt, duration, first_frame, first_mime, last_frame, last_mime))
-            return 'remote-1'
-    monkeypatch.setitem(core.PROVIDERS, 'minimax', FakeProvider)
     attempt = generation.submit(pid, 1, 1, confirm_paid=True, request_id='i2v')
-    assert attempt['status'] == 'SUBMITTED'
-    prompt, duration, first_frame, first_mime, last_frame, last_mime = received[0]
-    assert first_frame == first_bytes
-    assert last_frame == last_bytes
-    assert first_mime == 'image/png'
-    assert last_mime == 'image/png'
-    assert duration == state['shots'][0]['duration']
+    assert attempt['status'] == 'QUEUED'
+    from studio import jobs
+    from studio.handlers import video
+    job = jobs.get(attempt['id'])
+    payload = json.loads(job['payload_json'])
+    request = video._request(job, payload, core.HOME / pid)
+    assert request.first_frame == first_bytes
+    assert request.last_frame == last_bytes
+    assert request.first_frame_mime == request.last_frame_mime == 'image/png'
+    assert request.duration_sec == state['shots'][0]['duration']
+    assert payload['guided_request_id'] == 'i2v'
+    assert payload['first_frame_id'] == state['boundaries'][0]['confirmed_image_id']
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM guided_attempts').fetchone()[0] == 0
+        assert db.execute('SELECT budget_limit_microusd FROM runs WHERE id=?',
+                          (job['run_id'],)).fetchone()[0] == 1_000_000
+
+
+def test_submit_is_idempotent_by_request_id(project, monkeypatch):
+    pid, _ = project
+    with core.connect() as db:
+        db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    first = generation.submit(pid, 1, 2, confirm_paid=True, request_id='once')
+    assert first['status'] == 'QUEUED'
+    assert generation.submit(pid, 1, 2, confirm_paid=True, request_id='once') == first
+    assert generation.submit(pid, 1, 2, confirm_paid=True, request_id='new-click') == first
+    with pytest.raises(ValueError, match='another shot'):
+        generation.submit(pid, 2, 2, confirm_paid=True, request_id='once')
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+        db.execute("UPDATE jobs SET status='SUCCEEDED' WHERE id=?", (first['id'],))
+        # Retrying an accepted request must not revalidate changed inputs.
+        db.execute("UPDATE shots SET duration=3 WHERE project_id=? AND seq=1", (pid,))
+    replay = generation.submit(pid, 1, 2, confirm_paid=True, request_id='once')
+    assert replay['id'] == first['id']
+    assert replay['status'] == 'COMPLETED'
+
+
+def test_mock_submit_still_completes_synchronously(project):
+    pid, _ = project
+    result = generation.submit(pid, 1, 0, confirm_paid=False, request_id='mock-sync')
+    assert result['status'] == 'COMPLETED'
+    assert Path(result['file']).read_bytes() == b'generated'
+    assert result['asset_id']
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
 
 
 def test_minimax_rejects_undersized_boundary_frame(boundary_project, monkeypatch):

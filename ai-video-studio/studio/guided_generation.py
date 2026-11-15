@@ -1,5 +1,6 @@
 """One immutable output and one durable submission record per guided attempt."""
 import math
+import json
 import hashlib
 import mimetypes
 import os
@@ -12,6 +13,7 @@ import httpx
 from dotenv import load_dotenv
 
 from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities, guided_characters, guided_images, guided_boundaries
+from . import guided_compat, job_runner, ledger
 
 _RATES = {'minimax': 'MINIMAX_USD_PER_SECOND', 'wan': 'WAN_USD_PER_SECOND', 'flux': 'FAL_USD_PER_SECOND'}
 _ACTIVE = ('SUBMITTING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
@@ -195,12 +197,35 @@ def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mi
             path.unlink(missing_ok=True)
 
 
+def _existing_job(db, pid, shot_id, request_id):
+    row = db.execute('SELECT * FROM jobs WHERE project_id=? AND request_key=?',
+                     (pid, 'guided:' + request_id)).fetchone()
+    if row is not None:
+        if json.loads(row['payload_json']).get('shot_id') != shot_id:
+            raise ValueError('Request id belongs to another shot')
+        return guided_compat.project_job(dict(row), db=db)
+    row = db.execute(
+        "SELECT * FROM jobs WHERE project_id=? AND target_key=? "
+        "AND status IN ('PENDING','RUNNING','PAUSED','BLOCKED') ORDER BY created DESC LIMIT 1",
+        (pid, f'shot:{shot_id}')).fetchone()
+    if row is not None:
+        if 'guided_request_id' not in json.loads(row['payload_json']):
+            raise ValueError('An earlier non-Guided job is unresolved')
+        return guided_compat.project_job(dict(row), db=db)
+
+
 def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request_id: str) -> dict:
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Request id required')
+    with core.connect() as db:
+        shot = _shot(db, pid, seq)
+        existing = _existing_job(db, pid, shot['id'], request_id)
+        if existing:
+            return existing
     estimate = preview(pid, seq)
     first_frame = last_frame = None
     first_mime = last_mime = None
+    first_path = last_path = None
     if estimate['first_frame_id']:
         first_path = guided_images.image_path(pid, estimate['first_frame_id'])
         first_frame = first_path.read_bytes()
@@ -226,6 +251,9 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
             if existing['shot_id'] != shot['id']:
                 raise ValueError('Request id belongs to another shot')
             return dict(existing)
+        existing = _existing_job(db, pid, shot['id'], request_id)
+        if existing:
+            return existing
         active = db.execute("SELECT 1 FROM guided_attempts WHERE project_id=? AND shot_id=? AND status IN ('SUBMITTING','SUBMITTED','RUNNING','DOWNLOAD_PENDING')", (pid, shot['id'])).fetchone()
         if active:
             raise ValueError('An earlier attempt is unresolved; recover it before submitting again')
@@ -242,6 +270,24 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
         reserved = db.execute('SELECT COALESCE(SUM(reserved_usd),0) FROM guided_attempts WHERE project_id=?', (pid,)).fetchone()[0]
         if estimate['paid'] and reserved + estimate['estimated_cost_usd'] > p['budget'] + 1e-9:
             raise ValueError('Project budget insufficient')
+        if estimate['paid']:
+            if ledger.committed(pid, db=db) + ledger.to_micro(estimate['estimated_cost_usd']) > ledger.to_micro(p['budget']):
+                raise ValueError('Project budget insufficient')
+            run_id = job_runner.open_or_reuse_run(
+                pid, request_key=f'guided:{request_id}',
+                budget_microusd=ledger.to_micro(budget_usd), db=db)
+            job = job_runner.enqueue_shot(
+                pid, seq, run_id=run_id, provider=estimate['provider'], model=estimate['model'],
+                request_key=f'guided:{request_id}', db=db, guided_input={
+                    'guided_request_id': request_id,
+                    'first_frame_path': str(first_path) if first_path else None,
+                    'first_mime': first_mime,
+                    'last_frame_path': str(last_path) if last_path else None,
+                    'last_mime': last_mime,
+                    **{key: estimate[key] for key in ('first_frame_id', 'first_frame_sha256',
+                                                      'last_frame_id', 'last_frame_sha256')},
+                })
+            return guided_compat.project_job(job, db=db)
         db.execute('''INSERT INTO guided_attempts(id,project_id,shot_id,request_id,prompt,duration,provider,reserved_usd,status)
                       VALUES (?,?,?,?,?,?,?,?,?)''', (aid, pid, shot['id'], request_id, shot['prompt'], shot['duration'],
                                                     estimate['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
@@ -263,15 +309,6 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
         except Exception as exc:
             _update(pid, aid, status='FAILED', error=str(exc)[:500])
         return attempt(pid, aid)
-    try:
-        with httpx.Client(timeout=httpx.Timeout(40, connect=15), follow_redirects=False) as client:
-            provider = core.PROVIDERS[estimate['provider']](client)
-            remote = (provider.submit_i2v(shot['prompt'], shot['duration'], first_frame, first_mime, last_frame, last_mime)
-                      if first_frame is not None else provider.submit(shot['prompt'], shot['duration']))
-        _update(pid, aid, status='SUBMITTED', remote_id=remote)
-    except Exception as exc:
-        _update(pid, aid, error=str(exc)[:500])
-    return attempt(pid, aid)
 
 
 def _update(pid, aid, **values):
