@@ -2,9 +2,10 @@
 Date: 2026-11-15
 Status: Roadmap approved; M0 local acceptance tooling implemented and accepted by
 the user on 2026-11-15 within its documented scope. M1-A (migrations/ledger),
-M1-B (provider contract) and M1-C (persistent jobs, worker, leases, recovery,
-video handler pilot) are merged and verified by 331 Studio tests and 8 VBench
-tests. Paid entry points are not yet wired to the Job service; that is M1-D.
+M1-B (provider contract), M1-C (persistent jobs/worker/recovery) and M1-D1
+(legacy video jobs, job API, embedded worker) are merged and verified by 348
+Studio tests and 8 VBench tests. Guided paid entry points and other paid stages
+are not yet wired to the Job service; those are M1-D2 and M1-E.
 No paid testing was performed or authorized.
 
 ## Goal
