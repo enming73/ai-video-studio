@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from . import core
@@ -223,3 +224,84 @@ def stop_requested(job_id: str, db=None) -> str | None:
     if job['pause_requested']:
         return 'pause'
     return None
+
+
+def _future(now: str, seconds: int) -> tuple[str, str]:
+    current = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.isoformat(), (current + timedelta(seconds=seconds)).isoformat()
+
+
+def claim(owner: str, *, lease_seconds: int = 60, now: str | None = None,
+          db=None) -> dict | None:
+    if not isinstance(owner, str) or not owner:
+        raise ValueError('Worker owner is required')
+    if type(lease_seconds) is not int or lease_seconds <= 0:
+        raise ValueError('Invalid lease duration')
+    current, expiry = _future(now, lease_seconds)
+    with _tx(db) as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE status='PENDING' OR "
+            "(status='RUNNING' AND lease_expires IS NOT NULL AND lease_expires <= ?) "
+            'ORDER BY priority DESC, created, id LIMIT 1', (current,)).fetchone()
+        if row is None:
+            return None
+        recovered = row['status'] == 'RUNNING'
+        changed = conn.execute(
+            "UPDATE jobs SET status='RUNNING',lease_owner=?,lease_expires=?,updated=? "
+            "WHERE id=? AND (status='PENDING' OR status='RUNNING')",
+            (owner, expiry, current, row['id'])).rowcount
+        if changed != 1:
+            return None
+        _append(conn, row['id'], 'claimed',
+                {'owner': owner, 'recovered': recovered})
+        job = _row(conn, row['id'])
+        job['recovered'] = recovered
+        return job
+
+
+def heartbeat(job_id: str, owner: str, *, lease_seconds: int = 60,
+              now: str | None = None, db=None) -> bool:
+    if type(lease_seconds) is not int or lease_seconds <= 0:
+        raise ValueError('Invalid lease duration')
+    current, expiry = _future(now, lease_seconds)
+    conn = db or core.connect()
+    try:
+        changed = conn.execute(
+            "UPDATE jobs SET lease_expires=?,updated=? WHERE id=? AND lease_owner=? "
+            "AND status='RUNNING'", (expiry, current, job_id, owner)).rowcount
+        if db is None:
+            conn.commit()
+        return changed == 1
+    finally:
+        if db is None:
+            conn.close()
+
+
+def release(job_id: str, owner: str, db=None) -> None:
+    with _tx(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET lease_owner=NULL,lease_expires=NULL,updated=? "
+            "WHERE id=? AND lease_owner=?", (core.now(), job_id, owner))
+        _append(conn, job_id, 'lease_released', {'owner': owner})
+
+
+def recovery_action(job_id: str, *, max_attempts: int = 2, db=None) -> str:
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError('Invalid max attempts')
+    attempt = latest_attempt(job_id, db)
+    if attempt is None:
+        return 'execute'
+    status = attempt['status']
+    if status == 'COMPLETED':
+        return 'complete'
+    if status in ('SUBMITTING', 'UNKNOWN_REMOTE_STATE'):
+        return 'block_unknown'
+    if status in ('SUBMITTED', 'POLLING', 'DOWNLOADING', 'VALIDATING'):
+        return 'resume' if attempt['remote_id'] else 'block_unknown'
+    if status == 'FAILED_RETRYABLE':
+        return 'execute' if attempt['attempt_no'] < max_attempts else 'fail'
+    if status in ('FAILED_FINAL', 'ABANDONED'):
+        return 'fail'
+    return 'execute'
