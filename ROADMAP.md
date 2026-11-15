@@ -73,7 +73,7 @@ M0 现状验收基线
 
 ## M1 — 可恢复任务、Provider 契约与统一费用
 
-**状态：实施中（M1-A 迁移/账本、M1-B Provider 契约已完成并合并；M1-C/D/E 待规划）。依赖：M0。**
+**状态：实施中（M1-A 迁移/账本、M1-B Provider 契约、M1-C Job/Worker/恢复已完成并合并；M1-D/E 待规划）。依赖：M0。**
 
 工作包：
 
@@ -88,7 +88,7 @@ M0 现状验收基线
 - 新增 Studio 的任务服务、账本服务和版本化迁移模块，逐步从 `core.connect()` 中移出新增迁移。
 - 接入 `core.py`、`guided_generation.py`、`guided_storyboard.py`、`guided_images.py`、`guided_boundaries.py`、`reference_generation.py`、`narration.py`、`director_vision.py`、`continuity_vision.py`、`webapp.py`、`guided_web.py`。
 
-进展：M1-A（版本化迁移与费用账本）与 M1-B（Provider 契约、错误分类、能力/费用/统一接口）已完成并合并。计划分别见 `docs/superpowers/plans/2026-11-15-m1a-migrations-ledger.md` 与 `2026-11-15-m1b-provider-contract.md`；Studio 286 项、VBench 8 项测试通过。账本与契约基础已具备，但付费入口尚未接入，因此下列退出条件仍保持未完成。
+进展：M1-A（版本化迁移与费用账本）、M1-B（Provider 契约、错误分类、能力/费用/统一接口）与 M1-C（持久化 Job、Worker、租约、恢复、暂停/取消、视频处理器试点）已完成并合并。计划见 `docs/superpowers/plans/` 下对应文件；Studio 331 项、VBench 8 项测试通过。付费入口仍未接入 Job 服务，因此下列退出条件仍保持未完成。
 
 退出条件：
 

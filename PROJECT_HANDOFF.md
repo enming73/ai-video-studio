@@ -1,11 +1,11 @@
 # AI Video Studio — Project Handoff
 Date: 2026-11-15
 Status: Roadmap approved; M0 local acceptance tooling implemented and accepted by
-the user on 2026-11-15 within its documented scope. M1-A (versioned migrations
-and cost ledger) and M1-B (provider contract, classified errors, capabilities,
-cost estimates) are merged and verified by 286 Studio tests and 8 VBench tests.
-Paid entry points are not yet wired to the ledger or contract. No paid testing was
-performed or authorized. The next proposed step is M1-C (Job/Worker).
+the user on 2026-11-15 within its documented scope. M1-A (migrations/ledger),
+M1-B (provider contract) and M1-C (persistent jobs, worker, leases, recovery,
+video handler pilot) are merged and verified by 331 Studio tests and 8 VBench
+tests. Paid entry points are not yet wired to the Job service; that is M1-D.
+No paid testing was performed or authorized.
 
 ## Goal
 Build a complete AI filmmaking studio: one-click complete draft → optional manual
