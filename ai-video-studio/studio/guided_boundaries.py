@@ -617,6 +617,9 @@ def asset_matches_boundaries(db, pid: str, shot_id: str, asset_id: str) -> bool:
         JOIN guided_video_provenance p ON p.attempt_id=a.id
         WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=? LIMIT 1''',
         (pid, shot_id, asset_id)).fetchone()
+    if not provenance:
+        from . import guided_compat
+        provenance = guided_compat.asset_provenance(db, pid, shot_id, asset_id)
     return bool(provenance and provenance['frame_id'] == start_id
                 and provenance['last_frame_id'] == end_id)
 

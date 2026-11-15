@@ -100,12 +100,10 @@ def set_video_model(pid: str, provider: str, model: str, revision: int) -> dict:
 
 
 def attempt(pid: str, attempt_id: str) -> dict:
+    guided_compat.reconcile_outputs(pid)
     with core.connect() as db:
         guided_workflow._row(db, pid)
-        row = db.execute('SELECT * FROM guided_attempts WHERE project_id=? AND id=?', (pid, attempt_id)).fetchone()
-        if row is None:
-            raise ValueError('Unknown attempt')
-        return dict(row)
+        return guided_compat.find(pid, attempt_id, db=db)
 
 
 def abandon_pending(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:

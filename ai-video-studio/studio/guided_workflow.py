@@ -59,6 +59,9 @@ def get(pid: str) -> dict:
                 provenance = db.execute('''SELECT p.frame_id,p.frame_sha256,p.model FROM guided_attempts a
                     JOIN guided_video_provenance p ON p.attempt_id=a.id
                     WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=? LIMIT 1''', (pid,s['id'],s['asset_id'])).fetchone()
+                if not provenance:
+                    from . import guided_compat
+                    provenance = guided_compat.asset_provenance(db, pid, s['id'], s['asset_id'])
                 item['confirmed_frame_id'] = frame['confirmed_frame_id'] if frame else None
                 item['old_video_decision_required'] = bool(stale and s['asset_id'] and stale['keep_asset_id'] != s['asset_id'])
                 item['video_provenance'] = dict(provenance) if provenance else None

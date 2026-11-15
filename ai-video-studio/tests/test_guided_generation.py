@@ -267,6 +267,32 @@ def test_mock_submit_still_completes_synchronously(project):
         assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
 
 
+def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatch):
+    from studio import guided_compat, jobs
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=5 WHERE id=?', (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    generation.set_video_model(pid, 'minimax', 'MiniMax-H3', state['revision'])
+    state = confirm_pair(pid, workflow.get(pid), 0, 1)
+    result = generation.submit(pid, 1, 1, confirm_paid=True, request_id='provenance')
+    job = jobs.get(result['id'])
+    target = core.HOME / pid / 'completed.mp4'
+    target.write_bytes(b'completed')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='SUCCEEDED',output_json=? WHERE id=?",
+                   (json.dumps({'file': str(target)}), job['id']))
+    guided_compat.reconcile_outputs(pid)
+    result = generation.attempt(pid, result['id'])
+    timeline.select(pid, 1, result['asset_id'])
+    shot = workflow.get(pid)['shots'][0]
+    assert shot['old_video_decision_required'] is False
+    assert shot['video_provenance']['frame_id'] == state['boundaries'][0]['confirmed_image_id']
+    new_version = add_version(pid, state['boundaries'][0]['id'], 'new', size='1536x864')
+    boundaries.confirm(pid, state['boundaries'][0]['id'], new_version, workflow.get(pid)['revision'])
+    assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
+
+
 def test_minimax_rejects_undersized_boundary_frame(boundary_project, monkeypatch):
     monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
     pid, state = boundary_project
