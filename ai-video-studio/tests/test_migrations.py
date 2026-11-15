@@ -129,3 +129,85 @@ def test_python_migration_runs_once(tmp_path):
                                 backup_root=tmp_path / 'backups') == [1, 2]
         migrations.apply(db, db_path, directory=directory, backup_root=tmp_path / 'backups')
         assert db.execute('SELECT COUNT(*) FROM python_sample').fetchone()[0] == 1
+
+
+FOUNDATION = {
+    'runs': ('id', 'project_id', 'status', 'budget_limit_microusd', 'label',
+             'created', 'closed'),
+    'jobs': ('id', 'project_id', 'run_id', 'kind', 'status', 'request_key',
+             'payload_json', 'budget_limit_microusd', 'priority', 'lease_owner',
+             'lease_expires', 'cancel_requested', 'block_reason', 'error_class',
+             'error_detail', 'created', 'updated'),
+    'job_attempts': ('id', 'job_id', 'attempt_no', 'provider', 'model', 'status',
+                     'request_fingerprint', 'idempotency_key', 'remote_id',
+                     'input_json', 'output_json', 'error_class', 'error_detail',
+                     'retry_after_sec', 'created', 'updated'),
+    'job_events': ('id', 'job_id', 'attempt_id', 'type', 'data_json', 'created'),
+    'cost_entries': ('id', 'project_id', 'run_id', 'job_id', 'attempt_id', 'stage',
+                     'provider', 'model', 'pricing_version', 'reserved_microusd',
+                     'estimated_microusd', 'actual_microusd', 'billing_status',
+                     'evidence', 'legacy_key', 'created', 'updated'),
+}
+
+
+@pytest.fixture
+def foundation_db(tmp_path):
+    db_path = tmp_path / 'studio.sqlite3'
+    with open_db(db_path) as db:
+        migrations.apply(db, db_path, backup_root=tmp_path / 'backups')
+        yield db
+
+
+def add_job(db, job_id='job-1', project='p1', key='key-1'):
+    db.execute(
+        'INSERT INTO jobs(id,project_id,kind,status,request_key,payload_json,created,updated) '
+        "VALUES (?,?,'video','PENDING',?,'{}','now','now')",
+        (job_id, project, key))
+
+
+def add_attempt(db, attempt_id='a1', job='job-1', no=1, status='SUBMITTED',
+                fingerprint='fp-1'):
+    db.execute(
+        'INSERT INTO job_attempts(id,job_id,attempt_no,provider,model,status,'
+        'request_fingerprint,idempotency_key,input_json,created,updated) '
+        "VALUES (?,?,?,'minimax','m',?,?,?,'{}','now','now')",
+        (attempt_id, job, no, status, fingerprint, f'idem-{attempt_id}'))
+
+
+def test_foundation_tables_and_columns_exist(foundation_db):
+    for table, columns in FOUNDATION.items():
+        actual = {row[1] for row in foundation_db.execute(f'PRAGMA table_info({table})')}
+        assert set(columns) <= actual, table
+
+
+def test_duplicate_job_request_key_is_rejected(foundation_db):
+    add_job(foundation_db, 'job-1', 'p1', 'same')
+    with pytest.raises(sqlite3.IntegrityError):
+        add_job(foundation_db, 'job-2', 'p1', 'same')
+    add_job(foundation_db, 'job-3', 'p2', 'same')
+
+
+def test_duplicate_active_attempt_fingerprint_is_rejected(foundation_db):
+    add_job(foundation_db)
+    add_attempt(foundation_db, 'a1', 'job-1', 1, 'SUBMITTED', 'same-fp')
+    with pytest.raises(sqlite3.IntegrityError):
+        add_attempt(foundation_db, 'a2', 'job-1', 2, 'POLLING', 'same-fp')
+    foundation_db.execute(
+        "UPDATE job_attempts SET status='FAILED_RETRYABLE' WHERE id='a1'")
+    add_attempt(foundation_db, 'a2', 'job-1', 2, 'SUBMITTED', 'same-fp')
+
+
+def test_duplicate_cost_entry_per_attempt_stage_is_rejected(foundation_db):
+    def add_cost(entry_id, attempt='a1', stage='video', legacy=None):
+        foundation_db.execute(
+            'INSERT INTO cost_entries(id,project_id,attempt_id,stage,provider,model,'
+            'reserved_microusd,billing_status,legacy_key,created,updated) '
+            "VALUES (?,? ,? ,?,'minimax','m',100,'reserved',?,'now','now')",
+            (entry_id, 'p1', attempt, stage, legacy))
+    add_cost('c1')
+    with pytest.raises(sqlite3.IntegrityError):
+        add_cost('c2')
+    add_cost('c3', attempt=None, stage='video', legacy='shots:s1')
+    with pytest.raises(sqlite3.IntegrityError):
+        add_cost('c4', attempt=None, stage='video', legacy='shots:s1')
+
