@@ -56,6 +56,11 @@ def get(pid: str) -> dict:
                 item['cast_reviewed'] = bool(db.execute('SELECT 1 FROM guided_shot_cast_reviewed WHERE project_id=? AND shot_id=?', (pid,s['id'])).fetchone())
                 frame = db.execute('SELECT confirmed_frame_id FROM guided_frame_selection WHERE project_id=? AND shot_id=?', (pid,s['id'])).fetchone()
                 stale = db.execute('SELECT keep_asset_id FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,s['id'])).fetchone()
+                if stale and s['asset_id'] and guided_boundaries.asset_matches_boundaries(
+                        db, pid, s['id'], s['asset_id']):
+                    db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?',
+                               (pid, s['id']))
+                    stale = None
                 provenance = db.execute('''SELECT p.frame_id,p.frame_sha256,p.model FROM guided_attempts a
                     JOIN guided_video_provenance p ON p.attempt_id=a.id
                     WHERE a.project_id=? AND a.shot_id=? AND a.asset_id=? LIMIT 1''', (pid,s['id'],s['asset_id'])).fetchone()

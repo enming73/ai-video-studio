@@ -318,6 +318,12 @@ def test_paid_job_asset_matches_boundary_provenance(boundary_project, monkeypatc
     shot = workflow.get(pid)['shots'][0]
     assert shot['old_video_decision_required'] is False
     assert shot['video_provenance']['frame_id'] == state['boundaries'][0]['confirmed_image_id']
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL)', (pid, shot['id']))
+    assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is False
+    with core.connect() as db:
+        assert db.execute('SELECT 1 FROM guided_stale_shots WHERE project_id=? AND shot_id=?',
+                          (pid, shot['id'])).fetchone() is None
     new_version = add_version(pid, state['boundaries'][0]['id'], 'new', size='1536x864')
     boundaries.confirm(pid, state['boundaries'][0]['id'], new_version, workflow.get(pid)['revision'])
     assert workflow.get(pid)['shots'][0]['old_video_decision_required'] is True
