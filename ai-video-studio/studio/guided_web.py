@@ -314,7 +314,7 @@ def boundary_prompt_clear(pid: str, boundary_id: str, body: Revision):
 @router.get('/prompt-attempts')
 def prompt_attempts(pid: str):
     call(guided_workflow.get, pid)
-    return call(guided_boundaries.list_prompt_attempts, pid)
+    return call(guided_compat.prompt_attempt_records, pid)
 
 
 @router.post('/prompt-attempts/{attempt_id}/resolve')

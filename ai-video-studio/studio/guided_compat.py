@@ -309,6 +309,113 @@ def find_image(pid: str, attempt_id: str, db=None) -> dict:
         raise ValueError('Unknown image attempt')
 
 
+def _prompt_status(job: dict, attempt: dict | None) -> tuple[str, str | None]:
+    """Map an llm_prompt Job to the legacy prompt-attempt status/error pair."""
+    job_status = job['status']
+    detail = job['error_detail'] or job['block_reason']
+    if job_status in ('PENDING', 'RUNNING'):
+        if attempt is None:
+            return 'QUEUED', None
+        a = attempt['status']
+        if a in ('PLANNED', 'RESERVED'):
+            return 'QUEUED', None
+        if a == 'SUBMITTING':
+            return 'SUBMITTING', None
+        if a == 'COMPLETED':
+            return 'COMPLETED', None
+        if a == 'UNKNOWN_REMOTE_STATE':
+            return 'UNKNOWN', attempt.get('error_detail') or detail
+        if a in ('FAILED_FINAL', 'FAILED_RETRYABLE'):
+            return 'FAILED', attempt.get('error_detail') or detail
+        if a == 'ABANDONED':
+            return 'ACKNOWLEDGED', None
+        raise ValueError(f'Unsupported prompt attempt status: {a}')
+    if job_status == 'SUCCEEDED':
+        return 'COMPLETED', None
+    if job_status == 'BLOCKED':
+        if job['block_reason'] == 'unknown_remote' or (attempt and attempt['status'] == 'UNKNOWN_REMOTE_STATE'):
+            return 'UNKNOWN', detail
+        return 'FAILED', detail
+    if job_status == 'FAILED':
+        return 'FAILED', detail
+    if job_status == 'CANCELLED':
+        return 'ACKNOWLEDGED', None
+    raise ValueError(f'Unsupported prompt job status: {job_status}')
+
+
+def project_prompt_job(job: dict, *, db=None) -> dict:
+    """Project an llm_prompt Job into the legacy prompt-attempt shape."""
+    if job.get('kind') != 'llm_prompt':
+        raise ValueError('Unsupported prompt job kind')
+    payload = json.loads(job['payload_json'])
+    with job_runner._conn(db) as conn:
+        attempt = jobs.latest_attempt(job['id'], db=conn)
+        output = json.loads((attempt or {}).get('output_json') or '{}')
+        output.update(json.loads(job['output_json'] or '{}'))
+    status, error = _prompt_status(job, attempt)
+    return {
+        'id': attempt['id'] if attempt else job['id'],
+        'project_id': job['project_id'],
+        'boundary_id': payload['boundary_id'],
+        'request_id': payload['request_id'],
+        'status': status,
+        'model': payload['model'],
+        'budget_usd': payload['budget_usd'],
+        'source_sha256': payload['source_sha256'],
+        'result_prompt': output.get('prompt'),
+        'error': error,
+        'created': job['created'],
+    }
+
+
+def _prompt_jobs(conn, pid):
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM jobs WHERE project_id=? AND kind='llm_prompt' ORDER BY created DESC", (pid,))]
+
+
+_PROMPT_FIELDS = ('id', 'project_id', 'boundary_id', 'request_id', 'status', 'model',
+                  'budget_usd', 'source_sha256', 'result_prompt', 'error', 'created')
+
+
+def prompt_attempt_records(pid: str, db=None) -> list[dict]:
+    """llm_prompt Job projections newest-first, then legacy rows, deduped by id."""
+    with job_runner._conn(db) as conn:
+        guided_workflow._row(conn, pid)
+        jobs_rows = _prompt_jobs(conn, pid)
+        legacy = [{k: row[k] for k in _PROMPT_FIELDS} for row in conn.execute(
+            'SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    records = [project_prompt_job(job) for job in jobs_rows] + legacy
+    unique = {}
+    for row in records:
+        unique.setdefault(row['id'], row)
+    return list(unique.values())
+
+
+def find_prompt_job(pid: str, attempt_id: str, db=None) -> dict | None:
+    with job_runner._conn(db) as conn:
+        row = conn.execute(
+            "SELECT j.* FROM jobs j WHERE j.project_id=? AND j.kind='llm_prompt' "
+            'AND (j.id=? OR EXISTS (SELECT 1 FROM job_attempts a WHERE a.job_id=j.id AND a.id=?))',
+            (pid, attempt_id, attempt_id)).fetchone()
+        return dict(row) if row else None
+
+
+def find_prompt(pid: str, attempt_id: str, db=None) -> dict:
+    """Legacy prompt row first; otherwise the llm_prompt Job projection by Job ID,
+    latest attempt ID, or request ID."""
+    from . import request_jobs
+    with job_runner._conn(db) as conn:
+        row = conn.execute('SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? AND id=?',
+                           (pid, attempt_id)).fetchone()
+        if row:
+            return {k: row[k] for k in _PROMPT_FIELDS}
+        job = find_prompt_job(pid, attempt_id, db=conn) or \
+            request_jobs.find(pid, kind='llm_prompt', request_id=attempt_id, db=conn)
+        if job:
+            return project_prompt_job(job, db=conn)
+        raise ValueError('Unknown prompt attempt')
+
+
 def asset_provenance(db, pid, shot_id, asset_id):
     """Boundary snapshot for an asset registered from a Guided Job."""
     row = db.execute(

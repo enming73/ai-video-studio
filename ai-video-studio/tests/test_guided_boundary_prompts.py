@@ -1,13 +1,21 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from studio import core, guided_boundaries as boundaries, guided_workflow as workflow, webapp
+from studio import core, guided_boundaries as boundaries, guided_compat, guided_workflow as workflow, jobs, webapp
+from studio import worker
 
 
 @pytest.fixture(autouse=True)
 def llm_env(monkeypatch):
     monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
     monkeypatch.setenv('STUDIO_LLM_BASE_URL', 'https://example.com/v1')
+
+
+@pytest.fixture(autouse=True)
+def handlers():
+    from studio.handlers import register_all
+    register_all()
 
 
 @pytest.fixture
@@ -22,14 +30,61 @@ def llm(monkeypatch):
     return seen
 
 
+@pytest.fixture
+def prompt_project(boundary_project):
+    pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (5, pid))
+    return pid, state
+
+
+@pytest.fixture
+def prompt_job(prompt_project):
+    pid, state = prompt_project
+    boundary_id = state['boundaries'][1]['id']
+    queued = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 1,
+                                        confirm_paid=True, request_id='job-1',
+                                        revision=state['revision'])
+    return pid, boundary_id, queued
+
+
+def test_prompt_double_click_reuses_job(prompt_project, monkeypatch):
+    pid, state = prompt_project
+    boundary_id = state['boundaries'][1]['id']
+    revision = state['revision']
+    monkeypatch.setattr(core, '_llm_json', lambda *a: pytest.fail('no paid call during enqueue'))
+    first = boundaries.generate_prompt(pid, boundary_id, 'm', 1,
+                                       confirm_paid=True, request_id='a', revision=revision)
+    second = boundaries.generate_prompt(pid, boundary_id, 'm', 1,
+                                        confirm_paid=True, request_id='b', revision=revision)
+    assert first['id'] == second['id']
+    assert first['status'] == 'QUEUED'
+    assert guided_compat.find_prompt(pid, 'b')['id'] == first['id']
+
+
+def test_prompt_job_does_not_overwrite_changed_boundary(prompt_job, monkeypatch):
+    pid, boundary_id, queued = prompt_job
+    workflow.edit_shot(pid, 1, 'A different elephant scene by the sea.',
+                       workflow.get(pid)['revision'])
+    monkeypatch.setattr(core, '_llm_json', lambda *a: {'prompt': 'A new prompt ' * 4})
+    worker.run_once()
+    assert jobs.get(queued['id'])['status'] == 'FAILED'
+    assert 'A new prompt' not in boundaries.prompt_state(pid, boundary_id)['effective_prompt']
+
+
 def test_generate_prompt_stores_and_uses_llm_text(boundary_project, llm):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    result = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
+    queued = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
                                         confirm_paid=True, request_id='prompt-1',
                                         revision=state['revision'])
+    assert queued['status'] == 'QUEUED'
+    assert worker.run_once() == queued['id']
+    result = guided_compat.find_prompt(pid, queued['id'])
     assert result['status'] == 'COMPLETED'
-    assert result['prompt'].startswith('Wide shot of the elephant')
+    assert result['result_prompt'].startswith('Wide shot of the elephant')
     assert llm[0]['model'] == 'gpt-4o-mini'
     assert 'An elephant walks through the forest.' in llm[0]['user']
     info = boundaries.prompt_state(pid, boundary_id)
@@ -55,9 +110,13 @@ def test_generate_prompt_requires_budget_and_confirmation(boundary_project, monk
 
 def test_llm_prompt_becomes_stale_after_shot_edit(boundary_project, llm):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
-                               confirm_paid=True, request_id='prompt-1', revision=state['revision'])
+    queued = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
+                                        confirm_paid=True, request_id='prompt-1',
+                                        revision=state['revision'])
+    worker.run_once()
     workflow.edit_shot(pid, 1, 'A different elephant scene by the sea.',
                        workflow.get(pid)['revision'])
     info = boundaries.prompt_state(pid, boundary_id)
@@ -68,12 +127,16 @@ def test_llm_prompt_becomes_stale_after_shot_edit(boundary_project, llm):
 
 def test_failed_prompt_call_is_unresolved_and_blocks_regeneration(boundary_project, monkeypatch):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    monkeypatch.setattr(core, '_llm_json', lambda *args: (_ for _ in ()).throw(RuntimeError('network')))
+    monkeypatch.setattr(core, '_llm_json', lambda *args: (_ for _ in ()).throw(httpx.HTTPError('network')))
     result = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
                                         confirm_paid=True, request_id='prompt-1',
                                         revision=state['revision'])
-    assert result['status'] == 'UNKNOWN'
+    assert result['status'] == 'QUEUED'
+    worker.run_once()
+    assert guided_compat.find_prompt(pid, result['id'])['status'] == 'UNKNOWN'
     with pytest.raises(ValueError, match='unresolved'):
         boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
                                    confirm_paid=True, request_id='prompt-2',
@@ -83,14 +146,20 @@ def test_failed_prompt_call_is_unresolved_and_blocks_regeneration(boundary_proje
     retry = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
                                        confirm_paid=True, request_id='prompt-3',
                                        revision=workflow.get(pid)['revision'])
-    assert retry['status'] == 'COMPLETED'
+    assert retry['status'] == 'QUEUED'
+    worker.run_once()
+    assert guided_compat.find_prompt(pid, retry['id'])['status'] == 'COMPLETED'
 
 
 def test_clear_prompt_restores_auto(boundary_project, llm):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
-                               confirm_paid=True, request_id='prompt-1', revision=state['revision'])
+    queued = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
+                                        confirm_paid=True, request_id='prompt-1',
+                                        revision=state['revision'])
+    worker.run_once()
     boundaries.clear_prompt(pid, boundary_id, workflow.get(pid)['revision'])
     info = boundaries.prompt_state(pid, boundary_id)
     assert info['llm_prompt'] is None
@@ -98,16 +167,24 @@ def test_clear_prompt_restores_auto(boundary_project, llm):
 
 
 def test_prompt_generation_fails_fast_without_llm_key(boundary_project, monkeypatch):
+    from studio import prompt_jobs
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    monkeypatch.setattr(boundaries, 'load_dotenv', lambda: None)
+    monkeypatch.setattr(prompt_jobs, 'load_dotenv', lambda: None)
     monkeypatch.delenv('STUDIO_LLM_API_KEY', raising=False)
     monkeypatch.setattr(core, '_llm_json', lambda *args: pytest.fail('no request without a key'))
-    with pytest.raises(ValueError, match='STUDIO_LLM_API_KEY'):
-        boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
-                                   confirm_paid=True, request_id='no-key',
-                                   revision=state['revision'])
-    assert boundaries.list_prompt_attempts(pid) == []
+    queued = boundaries.generate_prompt(pid, boundary_id, 'gpt-4o-mini', 0.1,
+                                        confirm_paid=True, request_id='no-key',
+                                        revision=state['revision'])
+    assert queued['status'] == 'QUEUED'
+    worker.run_once()
+    assert guided_compat.find_prompt(pid, queued['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM guided_boundary_prompt_attempts').fetchone()[0] == 0
+        entry = db.execute('SELECT billing_status FROM cost_entries').fetchone()
+        assert entry is not None and entry['billing_status'] == 'released'
 
 
 def test_prompt_roles_for_opening_and_closing(boundary_project):
@@ -137,6 +214,8 @@ def test_prompt_is_scoped_to_the_project(boundary_project):
 
 def test_prompt_routes(boundary_project, llm):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
     base = f'/api/projects/{pid}/guided'
     api = TestClient(webapp.app)
@@ -150,7 +229,8 @@ def test_prompt_routes(boundary_project, llm):
                         json={'model': 'gpt-4o-mini', 'budget_usd': 0.1, 'confirm_paid': True,
                               'request_id': 'route-1', 'revision': state['revision']})
     assert response.status_code == 200, response.text
-    assert response.json()['status'] == 'COMPLETED'
+    assert response.json()['status'] == 'QUEUED'
+    assert worker.run_once() == response.json()['id']
     info = api.get(base + f'/boundaries/{boundary_id}/prompt').json()
     assert info['effective_source'] == 'llm'
     cleared = api.request('DELETE', base + f'/boundaries/{boundary_id}/prompt',
@@ -161,14 +241,19 @@ def test_prompt_routes(boundary_project, llm):
 
 def test_prompt_resolve_route(boundary_project, monkeypatch):
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     boundary_id = state['boundaries'][1]['id']
-    monkeypatch.setattr(core, '_llm_json', lambda *args: (_ for _ in ()).throw(RuntimeError('network')))
+    monkeypatch.setattr(core, '_llm_json', lambda *args: (_ for _ in ()).throw(httpx.HTTPError('network')))
     api = TestClient(webapp.app)
     base = f'/api/projects/{pid}/guided'
     response = api.post(base + f'/boundaries/{boundary_id}/prompt',
                         json={'model': 'gpt-4o-mini', 'budget_usd': 0.1, 'confirm_paid': True,
                               'request_id': 'route-unknown', 'revision': state['revision']})
-    assert response.json()['status'] == 'UNKNOWN'
+    assert response.json()['status'] == 'QUEUED'
+    worker.run_once()
+    listed = api.get(base + '/prompt-attempts').json()
+    assert any(x['request_id'] == 'route-unknown' and x['status'] == 'UNKNOWN' for x in listed)
     resolved = api.post(base + f'/prompt-attempts/{response.json()["id"]}/resolve',
                         json={'confirm_checked': True})
     assert resolved.status_code == 200

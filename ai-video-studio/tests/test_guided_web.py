@@ -229,6 +229,40 @@ def make_boundary_project(api):
     return pid, response.json(), base
 
 
+def test_prompt_attempts_projects_jobs_and_resolves(api):
+    import json
+    from studio import attempts, jobs, request_jobs
+    pid, state, base = make_boundary_project(api)
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
+    boundary_id = state['boundaries'][1]['id']
+    enqueued = api.post(base + f'/boundaries/{boundary_id}/prompt', json={
+        'model': 'gpt-4o-mini', 'budget_usd': 1, 'confirm_paid': True,
+        'request_id': 'prompt-1', 'revision': state['revision']})
+    assert enqueued.status_code == 200, enqueued.text
+    assert enqueued.json()['status'] == 'QUEUED'
+    listed = api.get(base + '/prompt-attempts').json()
+    assert any(x['request_id'] == 'prompt-1' and x['status'] == 'QUEUED' for x in listed)
+    job = request_jobs.find(pid, kind='llm_prompt', request_id='prompt-1')
+    attempt = attempts.create(job['id'], provider='llm', model='gpt-4o-mini',
+                              input_data=json.loads(job['payload_json']))
+    attempts.prepare_submission(attempt['id'], amount_microusd=1_000_000, pricing_version='test:v1')
+    attempts.mark_unknown(attempt['id'], 'uncertain submission')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?", (job['id'],))
+    listed = api.get(base + '/prompt-attempts').json()
+    assert any(x['request_id'] == 'prompt-1' and x['status'] == 'UNKNOWN' for x in listed)
+    rejected = api.post(base + f'/prompt-attempts/{job["id"]}/resolve', json={})
+    assert rejected.status_code == 400
+    resolved = api.post(base + f'/prompt-attempts/{job["id"]}/resolve', json={'confirm_checked': True})
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()['status'] == 'ACKNOWLEDGED'
+    with core.connect() as db:
+        assert jobs.get(job['id'], db=db)['status'] == 'CANCELLED'
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE attempt_id=?',
+                          (attempt['id'],)).fetchone()[0] == 'reserved'
+
+
 def test_boundary_routes(api):
     pid, state, base = make_boundary_project(api)
     list_response = api.get(base + '/boundaries')
