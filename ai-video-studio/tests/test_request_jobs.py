@@ -48,6 +48,24 @@ def test_request_id_belongs_to_another_operation(job_project):
                             payload={'x': 1}, budget_usd=1)
 
 
+def test_request_job_rejects_changed_payload_on_replay(job_project):
+    pid = job_project
+    request_jobs.submit(pid, kind='image', request_id='same', target_key='character:c1',
+                        payload={'x': 1}, budget_usd=1)
+    with pytest.raises(ValueError, match='different content'):
+        request_jobs.submit(pid, kind='image', request_id='same', target_key='character:c1',
+                            payload={'x': 2}, budget_usd=1)
+
+
+def test_request_job_rejects_changed_payload_on_target_reuse(job_project):
+    pid = job_project
+    request_jobs.submit(pid, kind='image', request_id='a', target_key='character:c1',
+                        payload={'x': 1}, budget_usd=1)
+    with pytest.raises(ValueError, match='different content'):
+        request_jobs.submit(pid, kind='image', request_id='b', target_key='character:c1',
+                            payload={'x': 2}, budget_usd=1)
+
+
 def test_find_returns_none_for_unknown(job_project):
     assert request_jobs.find(job_project, kind='image', request_id='missing') is None
 

@@ -7,12 +7,31 @@ open a second paid run for the same character, boundary, or storyboard.
 """
 from __future__ import annotations
 
+import json
 import math
 
 from . import core, job_runner, jobs, ledger
 
 REUSABLE_STATUSES = ('PENDING', 'RUNNING', 'PAUSED')
 REUSABLE_BLOCK_REASON = 'unknown_remote'
+
+
+def _content(payload: dict) -> dict:
+    """The work to be performed, excluding the caller's request identity.
+
+    Enqueue helpers embed ``request_id`` inside the payload alongside the
+    immutable content. The request id is already captured by the Job's request
+    key and alias events, and legitimately differs between double-clicks for the
+    same target, so it must not make two otherwise-identical requests look like
+    a content change.
+    """
+    return {key: value for key, value in payload.items() if key != 'request_id'}
+
+
+def _same_content(job: dict, payload: dict) -> bool:
+    """True when the incoming payload describes the same work as the Job."""
+    stored = json.loads(job['payload_json'])
+    return jobs._canonical(_content(stored)) == jobs._canonical(_content(payload))
 
 
 def _find_by_key(conn, pid, request_key):
@@ -60,7 +79,8 @@ def _remember_alias(db, job, request_id):
 
 
 def submit(pid: str, *, kind: str, request_id: str, payload: dict,
-           budget_usd: float, target_key: str | None = None) -> dict:
+           budget_usd: float, target_key: str | None = None,
+           run_key: str | None = None) -> dict:
     if isinstance(budget_usd, bool) or not isinstance(budget_usd, (int, float)) \
             or not math.isfinite(budget_usd) or budget_usd <= 0:
         raise ValueError('Budget must be a positive finite number')
@@ -71,6 +91,9 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
     if not isinstance(payload, dict):
         raise ValueError('Payload must be an object')
     request_key = f'{kind}:{request_id}'
+    if run_key is None:
+        # One Job per request uses its own Run; a batch shares one caller's Run.
+        run_key = request_key
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         core.project(db, pid)
@@ -78,6 +101,8 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
         if existing is not None:
             if existing['kind'] != kind or existing['target_key'] != target_key:
                 raise ValueError('Request id belongs to another operation')
+            if not _same_content(existing, payload):
+                raise ValueError('Request id reused with different content')
             return existing
         if target_key is not None:
             # Reuse only genuinely unresolved targets. A BLOCKED Job is only
@@ -93,10 +118,12 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
                 (pid, target_key, *REUSABLE_STATUSES, REUSABLE_BLOCK_REASON)).fetchone()
             if unresolved is not None:
                 job = dict(unresolved)
+                if not _same_content(job, payload):
+                    raise ValueError('Request id reused with different content')
                 _remember_alias(db, job, request_id)
                 return job
         run_id = job_runner.open_or_reuse_run(
-            pid, request_key=request_key,
+            pid, request_key=run_key,
             budget_microusd=ledger.to_micro(budget_usd), db=db)
         return jobs.create(pid, kind=kind, payload=payload, request_key=request_key,
                            run_id=run_id, target_key=target_key, db=db)

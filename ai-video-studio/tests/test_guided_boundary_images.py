@@ -86,3 +86,37 @@ def test_non_16_9_candidate_cannot_be_confirmed_until_cropped(boundary_project):
     cropped = boundaries.crop(pid, boundary_id, original, state['revision'])
     boundaries.confirm(pid, boundary_id, cropped['id'], workflow.get(pid)['revision'])
     assert workflow.get(pid)['boundaries'][0]['confirmed_image_id'] == cropped['id']
+
+
+def test_boundary_missing_reference_file_releases_reservation(tmp_path, monkeypatch):
+    import hashlib
+    from studio import image_jobs, jobs, request_jobs, worker
+    from studio.handlers import register_all
+    register_all()
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    pid = core.create('Elephant in forest', 10, 'mock', 5)
+    workflow.create(pid, character_stage_enabled=True)
+    directory = Path(core.HOME) / pid / 'guided-images'
+    directory.mkdir(parents=True, exist_ok=True)
+    ref_path = directory / 'ref.png'
+    raw = make_png(ref_path, '512x512')
+    digest = hashlib.sha256(raw).hexdigest()
+    image_id = 'refimg'
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_frame_versions(id,project_id,shot_id,file,sha256,stale) '
+                   'VALUES (?,?,?,?,?,?)',
+                   (image_id, pid, pid + '-s001', str(ref_path), digest, 0))
+    job = request_jobs.submit(
+        pid, kind='image', request_id='b1', budget_usd=1, target_key='boundary:b0',
+        payload={'target': 'boundary', 'project_id': pid, 'target_id': 'b0',
+                 'model': 'gpt-image-2.5-sunburst', 'budget_usd': 1, 'request_id': 'b1',
+                 'prompt': 'p', 'position': 0,
+                 'references': [{'id': 'c0', 'name': 'Luma', 'description': 'd',
+                                 'image_id': image_id, 'sha256': digest}]})
+    ref_path.unlink()
+    assert worker.run_once() == job['id']
+    assert jobs.get(job['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (job['id'],)).fetchone()[0] == 'released'
