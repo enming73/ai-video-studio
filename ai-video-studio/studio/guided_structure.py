@@ -7,6 +7,7 @@ from . import core, guided_boundaries, guided_characters, guided_storyboard, gui
 
 _UNRESOLVED_VIDEO = ('SUBMITTING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
 _UNRESOLVED_IMAGE = ('SUBMITTING', 'UNKNOWN')
+_UNRESOLVED_IMAGE_JOB = ('PENDING', 'RUNNING', 'PAUSED', 'BLOCKED')
 
 
 def _capabilities(db, pid, p, enabled):
@@ -29,6 +30,9 @@ def _reject_unresolved(db, pid):
         raise ValueError('An unresolved request blocks storyboard changes')
     if db.execute('SELECT 1 FROM guided_image_attempts WHERE project_id=? AND status IN (%s)'
                   % ','.join('?' for _ in _UNRESOLVED_IMAGE), (pid, *_UNRESOLVED_IMAGE)).fetchone():
+        raise ValueError('An unresolved request blocks storyboard changes')
+    if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='image' AND status IN (%s)"
+                  % ','.join('?' for _ in _UNRESOLVED_IMAGE_JOB), (pid, *_UNRESOLVED_IMAGE_JOB)).fetchone():
         raise ValueError('An unresolved request blocks storyboard changes')
 
 
