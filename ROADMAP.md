@@ -1,7 +1,7 @@
 # AI Video Studio — Roadmap
 
 更新：2026-11-16
-路线图及 M0 实施已获用户确认；M0 已验收。M1 实施中：M1-A/B/C、M1-D1 与 M1-D2 已完成并合并；M1-E1（Guided 付费分镜/图像/边界提示词 Job）已实现、待合并；M1-E2/E3 待规划。
+路线图及 M0 实施已获用户确认；M0 已验收。M1 实施中：M1-A/B/C、M1-D1、M1-D2 与 M1-E1（Guided 付费分镜/图像/边界提示词 Job）已完成并合并；M1-E2/E3 待规划。
 
 > **一键初稿 → 按需精修 → 局部重做 → 可靠导出。**
 >
@@ -27,7 +27,7 @@
 | 声音 | 旁白、TTS、音乐、SFX、字幕、ducking | 自动编排、试听一致性、响度控制 |
 | 质量 | FFprobe/FFmpeg 分析、VLM 建议 | 与自动流程衔接的硬性质量门槛 |
 | 费用 | 多处预算参数和视频费用预留 | 全阶段统一账本、对账、完整报告 |
-| 测试 | Studio 431 项、VBench 8 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
+| 测试 | Studio 440 项、VBench 8 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
 
 源码定位：`studio/core.py`、`guided_generation.py`、`timeline.py`、`sound.py`、`webapp.py`（均位于 `ai-video-studio/`）；共享适配器位于 `video-provider-core/src/video_provider_core/`。
 
@@ -73,7 +73,7 @@ M0 现状验收基线
 
 ## M1 — 可恢复任务、Provider 契约与统一费用
 
-**状态：实施中（M1-A/B/C、M1-D1 legacy Job/API 与 M1-D2 Guided 付费视频 Job 已完成并合并；M1-E1 Guided 付费分镜/图像/边界提示词 Job 已实现、待合并；M1-E2/E3 待规划）。依赖：M0。**
+**状态：实施中（M1-A/B/C、M1-D1 legacy Job/API、M1-D2 Guided 付费视频 Job 与 M1-E1 Guided 付费分镜/图像/边界提示词 Job 已完成并合并；M1-E2/E3 待规划）。依赖：M0。**
 
 工作包：
 
@@ -96,9 +96,9 @@ D2 验证证据：Studio 393 项、VBench 8 项测试通过，前端生产构建
 
 仍未覆盖：提交后、Worker 启动前的真实重启（由自动测试覆盖）；真实 unknown remote 人工恢复；`PAUSED` 的旧状态映射；实际账单 `settled` 对账。其他付费阶段仍未接入，因此下列退出条件保持未完成。
 
-M1-E1（Guided 付费分镜/图像/边界提示词 Job 与兼容投影）已实现（本分支，merge 待定）：付费故事板 LLM（`llm_storyboard`）、角色/边界帧图像（`image`）与边界提示词 LLM（`llm_prompt`）均改为持久化 Job，共用 `request_jobs.submit` 入队，由 Worker 或 `studio web` 内嵌 worker 执行；每次付费均需明确确认、正预算与幂等 request ID；未知结果保留预留并 `BLOCKED`，绝不自动重试；`/plan/attempts`、`/image-attempts`、`/prompt-attempts` 保留 URL 与响应字段，合并历史行与只读 Job 投影、不双写旧表；无法映射的状态（如 `PAUSED`）从列表跳过、单独访问该条目时返回明确兼容错误。React 仅改动轮询/确认/警告/刷新。
+M1-E1（Guided 付费分镜/图像/边界提示词 Job 与兼容投影）已完成并合并（PR #14，merge `fea3903`）：付费故事板 LLM（`llm_storyboard`）、角色/边界帧图像（`image`）与边界提示词 LLM（`llm_prompt`）均改为持久化 Job，共用 `request_jobs.submit` 入队，由 Worker 或 `studio web` 内嵌 worker 执行；每次付费均需明确确认、正预算与幂等 request ID；未知结果保留预留并 `BLOCKED`，绝不自动重试；`/plan/attempts`、`/image-attempts`、`/prompt-attempts` 保留 URL 与响应字段，合并历史行与只读 Job 投影、不双写旧表；无法映射的状态（如 `PAUSED`）从列表跳过、单独访问该条目时返回明确兼容错误。React 仅改动轮询/确认/警告/刷新。
 
-E1 验证证据：Studio 431 项、VBench 8 项测试通过，前端生产构建通过；付费路径全部使用假 provider/LLM，不调用真实付费 API；跨入口回归测试 `test_attempt_lists_survive_blocked_jobs` 证明任一 Job `BLOCKED` 时三个列表端点仍返回 200 与受支持行。
+E1 验证证据：Studio 440 项、VBench 8 项测试通过，前端生产构建通过；付费路径全部使用假 provider/LLM，不调用真实付费 API；最终整分支评审的 3 个 Important 资金完整性问题已修复，scoped re-review 无新的 Critical/Important。
 
 E1 仍未覆盖：`PAUSED` 的旧状态映射、真实付费恢复与付费 UI 端到端路径；E2（旁白/TTS/参考图）与 E3（导演/连续性视觉评审）仍待规划。
 
