@@ -1,17 +1,33 @@
 """Local-only REST API for v0.7 React timeline editor. No paid AI calls."""
 from __future__ import annotations
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from uuid import uuid4
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import core, timeline, sound
 
-app = FastAPI(title="AI Video Studio", version="0.9.5", docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+@asynccontextmanager
+async def lifespan(app):
+    if os.getenv('STUDIO_DISABLE_EMBEDDED_WORKER') != '1':
+        from . import worker
+        worker.start_embedded()
+    try:
+        yield
+    finally:
+        from . import worker
+        worker.stop_embedded()
+
+
+app = FastAPI(title="AI Video Studio", version="0.9.5", docs_url="/api/docs",
+              openapi_url="/api/openapi.json", lifespan=lifespan)
 
 def checked_pid(pid: str):
     with core.connect() as db: core.project(db,pid)
@@ -212,9 +228,7 @@ def director_review_decision(pid: str,rid: str,seq: int,body: DirectorDecision):
 
 # Production workflow: the browser calls the same core operations as the CLI.
 # No subprocess shell, no paid calls without a separate explicit live request.
-_production_pool = ThreadPoolExecutor(max_workers=1)
-_production_lock = Lock()
-_production_jobs: dict[str, dict] = {}
+# v0.9.3 production generation is persistent (see job_runner/worker).
 
 class CreateProjectRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=5000)
@@ -253,17 +267,8 @@ def production_estimate(pid: str,body: GenerateProjectRequest):
     # Dry-run is always forced here, regardless of the submitted live flag.
     return {'estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
 
-def _production_execute(jid: str,pid: str,budget: float,limit: int):
-    with _production_lock:
-        job=_production_jobs[jid]; job['status']='running'
-        try:
-            result=core.generate(pid,live=True,budget=budget,limit=limit)
-            job['result']=result; job['status']='completed'
-        except Exception as exc:
-            job['status']='failed'; job['error']=str(exc)[:1000]
-
 @app.post('/api/projects/{pid}/production/generate',status_code=202)
-def production_generate(pid: str,body: GenerateProjectRequest):
+def production_generate(pid: str,body: GenerateProjectRequest,idempotency_key: str | None = Header(None, alias='Idempotency-Key')):
     checked_pid(pid)
     if not body.live:
         return {'status':'dry_run','estimate':api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)}
@@ -277,20 +282,40 @@ def production_generate(pid: str,body: GenerateProjectRequest):
             raise HTTPException(400,'Mock projects are not paid cloud projects')
         if body.budget>p['budget']:
             raise HTTPException(400,'Run budget cannot exceed project budget')
-    # Preflight before queuing; still no provider call.
-    estimate=api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)
-    jid=uuid4().hex
-    job={'id':jid,'project_id':pid,'status':'queued','estimate':estimate,'result':None,'error':None}
-    _production_jobs[jid]=job
-    _production_pool.submit(_production_execute,jid,pid,body.budget,body.limit)
-    return job
+    api_call(core.generate,pid,live=False,budget=body.budget,limit=body.limit)
+    from . import job_runner
+    job_runner.reconcile(pid)
+    try:
+        enqueued=job_runner.enqueue_project(pid,budget_usd=body.budget,
+                                            request_key=idempotency_key or uuid4().hex,
+                                            limit=body.limit)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    return {'id':enqueued['run_id'],'run_id':enqueued['run_id'],
+            'job_ids':[job['id'] for job in enqueued['jobs']],'status':'queued'}
 
 @app.get('/api/projects/{pid}/production/jobs/{jid}')
 def production_job(pid: str,jid: str):
     checked_pid(pid)
-    job=_production_jobs.get(jid)
-    if not job or job['project_id']!=pid: raise HTTPException(404,'Job not found')
-    return job
+    from . import job_runner
+    job_runner.reconcile(pid)
+    with core.connect() as db:
+        row=db.execute('SELECT * FROM jobs WHERE project_id=? AND id=?',(pid,jid)).fetchone()
+        if row:
+            data=dict(row); data['jobs']=[dict(data)]
+        else:
+            data={'id':jid,'project_id':pid,'run_id':jid,
+                  'jobs':[dict(r) for r in db.execute(
+                      'SELECT * FROM jobs WHERE project_id=? AND run_id=? ORDER BY created',
+                      (pid,jid))]}
+    if not data['jobs']: raise HTTPException(404,'Job not found')
+    statuses=[j['status'] for j in data['jobs']]
+    if all(s=='SUCCEEDED' for s in statuses): data['status']='completed'
+    elif any(s=='BLOCKED' for s in statuses): data['status']='blocked'
+    elif any(s=='FAILED' for s in statuses): data['status']='failed'
+    else: data['status']='running'
+    data['result']={'jobs':len(statuses),'completed':statuses.count('SUCCEEDED')}
+    return data
 
 # v0.9.4: offline adjacent-shot boundary evidence; no generation calls.
 @app.post('/api/projects/{pid}/director/continuity')
@@ -349,3 +374,6 @@ def continuity_vision_report(pid: str,rid: str):
 
 from .guided_web import router as guided_router
 app.include_router(guided_router)
+
+from . import job_web as _job_web
+app.include_router(_job_web.router)

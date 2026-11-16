@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from . import core, guided_generation, guided_storyboard, guided_workflow
+from . import core, guided_compat, guided_generation, guided_storyboard, guided_workflow
 from . import guided_images, guided_characters, guided_boundaries, guided_structure
 
 router = APIRouter(prefix='/api/projects/{pid}/guided')
@@ -83,6 +83,7 @@ class ShotEdit(Revision):
 
 class Recover(BaseModel):
     remote_id: str | None = None
+    confirm_checked: bool = False
 
 
 class AbandonAttempt(BaseModel):
@@ -421,9 +422,8 @@ def shot_confirm(pid: str, seq: int, body: Confirm):
 
 @router.get('/attempts')
 def attempts(pid: str):
-    call(guided_workflow.get, pid)
-    with core.connect() as db:
-        return [dict(r) for r in db.execute('SELECT * FROM guided_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    call(guided_compat.reconcile_outputs, pid)
+    return call(guided_compat.attempt_records, pid)
 
 
 @router.get('/attempts/{attempt_id}')
@@ -433,12 +433,14 @@ def attempt(pid: str, attempt_id: str):
 
 @router.post('/attempts/{attempt_id}/recover')
 def recover(pid: str, attempt_id: str, body: Recover):
-    return call(guided_generation.recover, pid, attempt_id, body.remote_id)
+    return call(guided_generation.recover, pid, attempt_id, body.remote_id,
+                confirm_checked=body.confirm_checked)
 
 
 @router.post('/attempts/{attempt_id}/trim')
-def trim_attempt(pid: str, attempt_id: str):
-    return call(guided_generation.trim_pending, pid, attempt_id)
+def trim_attempt(pid: str, attempt_id: str, body: AbandonAttempt | None = None):
+    return call(guided_generation.trim_pending, pid, attempt_id,
+                confirm_checked=body.confirm_checked if body else False)
 
 
 @router.post('/attempts/{attempt_id}/abandon')

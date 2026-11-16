@@ -26,9 +26,15 @@ def now():
 
 def connect():
     HOME.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(HOME / "studio.sqlite3", timeout=30)
+    db_path = HOME / "studio.sqlite3"
+    existed = db_path.exists()
+    db = sqlite3.connect(db_path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    from . import migrations
+    pending = migrations.pending(db)
+    if existed and pending and migrations.has_legacy_data(db):
+        migrations.backup_database(db, db_path, HOME / "backups")
     db.executescript("""
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY, prompt TEXT NOT NULL, duration INTEGER NOT NULL,
@@ -149,6 +155,7 @@ def connect():
         if name not in provenance_columns:
             db.execute(f"ALTER TABLE guided_video_provenance ADD COLUMN {name} {kind}")
     db.commit()
+    migrations.apply(db, db_path, backup=False)
     return db
 
 def project(db, pid):
@@ -430,7 +437,12 @@ def status(pid):
     with connect() as db:
         p = dict(project(db, pid))
         shots = [dict(s) for s in db.execute("SELECT * FROM shots WHERE project_id=? ORDER BY seq", (pid,))]
+        from . import jobs
+        job_rows = [dict(r) for r in db.execute(
+            'SELECT id,status,block_reason,error_class,created FROM jobs '
+            'WHERE project_id=? ORDER BY created DESC LIMIT 50', (pid,))]
     return {"project": p, "shots": shots, "estimated_cost_usd": round(sum(s["reserved_usd"] for s in shots),3),
+            "jobs": job_rows,
             "output": str(HOME / pid / "final.mp4") if (HOME / pid / "final.mp4").exists() else None}
 
 
@@ -465,76 +477,17 @@ def generate_cloud(pid, live=False, budget=None, poll_interval=15, limit=0):
         planned = sum(s["duration"] * rate for s in pending if s["status"] == "PLANNED")
         if not live:
             return {"mode":"DRY_RUN", "shots":len(pending), "new_estimate_usd":round(planned,3), "already_reserved_usd":round(reserved,3), "budget_usd":ceiling}
-    output = HOME / pid / "clips"
-    output.mkdir(parents=True, exist_ok=True)
-    processed = 0
-    with httpx.Client(timeout=httpx.Timeout(40,connect=15),follow_redirects=False) as client:
-        provider = PROVIDERS[p["provider"]](client)
-        for shot in pending:
-            sid = shot["id"]
-            state = shot["status"]
-            remote = shot["remote_id"]
-            if state in ("SUBMITTING", "GENERATING") and not remote:
-                print(sid, "ambiguous submission: use studio attach after checking provider dashboard")
-                continue
-            if state in ("FAILED", "CANCELLED"):
-                continue
-            if state == "PLANNED":
-                cost = shot["duration"] * rate
-                with connect() as db:
-                    reserved = db.execute("SELECT COALESCE(SUM(reserved_usd),0) FROM shots WHERE project_id=?", (pid,)).fetchone()[0]
-                    if reserved + cost > ceiling + 1e-9:
-                        print(sid, "SKIPPED: budget ceiling")
-                        continue
-                    db.execute("UPDATE shots SET status='SUBMITTING', attempts=attempts+1, reserved_usd=?, error=NULL WHERE id=?",(cost,sid))
-                try:
-                    remote = provider.submit(shot["prompt"],shot["duration"])
-                except Exception as e:
-                    with connect() as db:
-                        db.execute("UPDATE shots SET error=? WHERE id=?",(str(e)[:500],sid))
-                    print(sid, "submission uncertain:",str(e)[:180])
-                    continue
-                with connect() as db:
-                    db.execute("UPDATE shots SET status='SUBMITTED',remote_id=? WHERE id=?",(remote,sid))
-            url = shot["video_url"] if state == "DOWNLOAD_PENDING" else None
-            if not url:
-                while True:
-                    try:
-                        result = provider.poll(remote)
-                    except Exception as e:
-                        print(sid,"poll failed, resume next run:",str(e)[:180])
-                        break
-                    if result.status == "failed":
-                        with connect() as db:
-                            db.execute("UPDATE shots SET status='FAILED',error=? WHERE id=?",(result.error,sid))
-                        break
-                    if result.status == "succeeded":
-                        url = result.url
-                        with connect() as db:
-                            db.execute("UPDATE shots SET status='DOWNLOAD_PENDING',video_url=? WHERE id=?",(url,sid))
-                        break
-                    with connect() as db:
-                        db.execute("UPDATE shots SET status='RUNNING' WHERE id=?",(sid,))
-                    time.sleep(poll_interval)
-            if url:
-                target=output / f"{sid}.mp4"
-                try:
-                    if not target.exists():
-                        download(client,url,target)
-                    verify_video(target,shot["duration"])
-                except Exception as e:
-                    with connect() as db:
-                        db.execute("UPDATE shots SET error=? WHERE id=?",(str(e)[:500],sid))
-                    print(sid,"download/verification pending:",str(e)[:180])
-                    continue
-                with connect() as db:
-                    db.execute("UPDATE shots SET status='COMPLETED',file=?,error=NULL WHERE id=?",(str(target),sid))
-                processed += 1
-    with connect() as db:
-        remaining = db.execute("SELECT COUNT(*) FROM shots WHERE project_id=? AND status!='COMPLETED'",(pid,)).fetchone()[0]
-        if remaining == 0:
-            db.execute("UPDATE projects SET status='GENERATED' WHERE id=?",(pid,))
-    return {"completed_this_run":processed,"remaining":remaining}
+    from . import job_runner
+    enqueued = job_runner.enqueue_project(
+        pid, budget_usd=ceiling, request_key=f'legacy-{uuid.uuid4().hex}',
+        limit=limit)
+    states = job_runner.run_until([job['id'] for job in enqueued['jobs']],
+                                  timeout=3600)
+    job_runner.reconcile(pid)
+    completed = sum(1 for state in states if state['status'] == 'SUCCEEDED')
+    remaining = sum(1 for state in states if state['status'] not in ('SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED'))
+    return {"mode": "LIVE", "run_id": enqueued['run_id'],
+            "jobs": states, "completed_this_run": completed, "remaining": remaining}
 
 def attach(pid, shot_id, remote_id):
     if not remote_id.strip():

@@ -1,10 +1,13 @@
 """One immutable output and one durable submission record per guided attempt."""
 import math
+import json
 import hashlib
 import mimetypes
 import os
 import re
 import subprocess
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,6 +15,7 @@ import httpx
 from dotenv import load_dotenv
 
 from . import core, timeline, guided_workflow, guided_storyboard, provider_capabilities, guided_characters, guided_images, guided_boundaries
+from . import attempts as attempt_store, guided_compat, job_runner, jobs, ledger, worker
 
 _RATES = {'minimax': 'MINIMAX_USD_PER_SECOND', 'wan': 'WAN_USD_PER_SECOND', 'flux': 'FAL_USD_PER_SECOND'}
 _ACTIVE = ('SUBMITTING', 'SUBMITTED', 'RUNNING', 'DOWNLOAD_PENDING')
@@ -98,12 +102,10 @@ def set_video_model(pid: str, provider: str, model: str, revision: int) -> dict:
 
 
 def attempt(pid: str, attempt_id: str) -> dict:
+    guided_compat.reconcile_outputs(pid)
     with core.connect() as db:
         guided_workflow._row(db, pid)
-        row = db.execute('SELECT * FROM guided_attempts WHERE project_id=? AND id=?', (pid, attempt_id)).fetchone()
-        if row is None:
-            raise ValueError('Unknown attempt')
-        return dict(row)
+        return guided_compat.find(pid, attempt_id, db=db)
 
 
 def abandon_pending(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:
@@ -111,18 +113,45 @@ def abandon_pending(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict
         raise ValueError('Explicit confirmation is required')
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        result = db.execute("UPDATE guided_attempts SET status='ABANDONED' WHERE project_id=? AND id=? AND status='DOWNLOAD_PENDING' AND video_url IS NOT NULL", (pid, attempt_id))
-        if result.rowcount != 1:
-            raise ValueError('Only a completed remote result awaiting download can be ended')
+        job = _job_for_action(db, pid, attempt_id)
+        if job:
+            _require_idle(job)
+            current = jobs.latest_attempt(job['id'], db=db)
+            if current and current['status'] == 'ABANDONED':
+                return guided_compat.project_job(job, db=db)
+            if not current or current['status'] not in ('UNKNOWN_REMOTE_STATE', 'DOWNLOADING', 'VALIDATING'):
+                raise ValueError('Only an unknown or pending download attempt can be ended')
+            attempt_store.abandon(current['id'], 'User checked; remote may continue and bill', db=db)
+            db.execute("UPDATE jobs SET status='CANCELLED',cancel_requested=1,lease_owner=NULL,"
+                       "lease_expires=NULL,updated=? WHERE id=?", (core.now(), job['id']))
+            jobs.append_event(job['id'], 'guided_abandoned',
+                              {'warning': 'remote may continue and bill'}, attempt_id=current['id'], db=db)
+            return guided_compat.project_job(jobs.get(job['id'], db=db), db=db)
+        row = db.execute('SELECT status,video_url FROM guided_attempts WHERE project_id=? AND id=?',
+                         (pid, attempt_id)).fetchone()
+        if row is None:
+            raise ValueError('Unknown attempt')
+        if row['status'] == 'ABANDONED':
+            pass
+        elif row['status'] == 'SUBMITTING' or (
+                row['status'] == 'DOWNLOAD_PENDING' and row['video_url']):
+            db.execute("UPDATE guided_attempts SET status='ABANDONED' WHERE project_id=? AND id=?",
+                       (pid, attempt_id))
+        else:
+            raise ValueError('Only an unknown or completed remote result awaiting download can be ended')
     return attempt(pid, attempt_id)
 
 
-def trim_pending(pid: str, attempt_id: str) -> dict:
+def trim_pending(pid: str, attempt_id: str, *, confirm_checked: bool = False) -> dict:
     if not re.fullmatch(r'[0-9a-f]{32}', attempt_id):
         raise ValueError('Invalid attempt id')
     with core.connect() as db:
         timeline.migrate(db)
         db.execute('BEGIN IMMEDIATE')
+        job = _job_for_action(db, pid, attempt_id)
+        if job:
+            _require_confirmation(confirm_checked)
+            return _trim_job(db, job)
         row = db.execute('''SELECT a.*, s.seq, s.duration AS current_duration, s.archived
                             FROM guided_attempts a JOIN shots s ON s.id=a.shot_id AND s.project_id=a.project_id
                             WHERE a.project_id=? AND a.id=?''', (pid, attempt_id)).fetchone()
@@ -156,6 +185,86 @@ def trim_pending(pid: str, attempt_id: str) -> dict:
         db.execute("UPDATE guided_attempts SET status='COMPLETED',file=?,asset_id=?,error=NULL WHERE project_id=? AND id=?",
                    (str(target), asset_id, pid, attempt_id))
     return attempt(pid, attempt_id)
+
+
+def _require_confirmation(confirmed):
+    if confirmed is not True:
+        raise ValueError('Explicit confirmation is required: send confirm_checked=true')
+
+
+def _job_for_action(db, pid, attempt_id):
+    guided_workflow._row(db, pid)
+    if db.execute('SELECT 1 FROM guided_attempts WHERE project_id=? AND id=?',
+                   (pid, attempt_id)).fetchone():
+        return None
+    job = guided_compat.find_job(pid, attempt_id, db=db)
+    if job is None:
+        raise ValueError('Unknown attempt')
+    latest = jobs.latest_attempt(job['id'], db=db)
+    if attempt_id != job['id'] and (not latest or latest['id'] != attempt_id):
+        raise ValueError('Historical attempt cannot change the latest job')
+    return job
+
+
+def _require_idle(job):
+    if (job['status'] == 'RUNNING' and job['lease_owner'] and job['lease_expires']
+            and datetime.fromisoformat(job['lease_expires']).replace(tzinfo=timezone.utc)
+            > datetime.now(timezone.utc)):
+        raise ValueError('An active worker owns this job; query it later')
+
+
+def _trim_job(db, job):
+    _require_idle(job)
+    state = guided_compat.project_job(job, db=db)
+    current = jobs.latest_attempt(job['id'], db=db)
+    shot = db.execute('SELECT * FROM shots WHERE project_id=? AND id=? AND archived=0',
+                      (job['project_id'], state['shot_id'])).fetchone()
+    if not shot:
+        raise ValueError('Only an active shot can be trimmed')
+    output = json.loads(job['output_json'] or '{}')
+    if state['status'] == 'DOWNLOAD_PENDING' and current and current['status'] in ('DOWNLOADING', 'VALIDATING'):
+        event = db.execute(
+            "SELECT data_json FROM job_events WHERE job_id=? AND type='download_ready' "
+            'ORDER BY created DESC,rowid DESC LIMIT 1', (job['id'],)).fetchone()
+        if event:
+            output.update(json.loads(event['data_json']))
+    if state['status'] not in ('COMPLETED', 'DOWNLOAD_PENDING') or not output.get('file'):
+        raise ValueError('Only a completed or pending downloaded Job can be trimmed')
+    if output.get('guided_trim_duration') == shot['duration']:
+        return state
+    source = Path(output['file']).resolve()
+    if not source.is_relative_to((core.HOME / job['project_id']).resolve()) or not source.is_file():
+        raise ValueError('Invalid completed video file')
+    probe = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                            'stream=duration', '-of', 'default=nw=1:nk=1', str(source)],
+                           capture_output=True, text=True, check=True)
+    try:
+        duration = float(probe.stdout.strip())
+    except ValueError:
+        raise ValueError('Cannot determine downloaded video duration') from None
+    if not math.isfinite(duration) or duration < shot['duration']:
+        raise ValueError('Downloaded video is shorter than the current shot; cannot trim')
+    # Keep the original registered as a selectable version too.
+    timeline._register(db, job['project_id'], shot, 'job:' + job['id'], source)
+    target = source.with_name('trimmed-' + uuid4().hex + '.mp4')
+    core.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n', '-i', str(source),
+              '-t', str(shot['duration']), '-map', '0:v:0', '-map', '0:a:0?',
+              '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', str(target)])
+    core.verify_video(target, shot['duration'])
+    asset = timeline._register(db, job['project_id'], shot, 'job:' + job['id'], target)
+    output.update(file=str(target), asset_id=asset, sha256=timeline._hash(target),
+                  original_file=output.get('original_file', str(source)),
+                  guided_trim_duration=shot['duration'])
+    jobs.append_event(job['id'], 'guided_trimmed', {'file': str(target), 'asset_id': asset,
+                                                  'duration': shot['duration']}, db=db)
+    if current and current['status'] in ('DOWNLOADING', 'VALIDATING'):
+        attempt_store.mark_completed(current['id'], output, db=db)
+    if job['status'] == 'BLOCKED':
+        jobs.set_status(job['id'], 'SUCCEEDED', output=output, db=db)
+    else:
+        db.execute('UPDATE jobs SET output_json=?,updated=? WHERE id=?',
+                   (json.dumps(output), core.now(), job['id']))
+    return guided_compat.project_job(jobs.get(job['id'], db=db), db=db)
 
 
 def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mime):
@@ -195,12 +304,58 @@ def _mock_frame_video(shot, target, first_frame, first_mime, last_frame, last_mi
             path.unlink(missing_ok=True)
 
 
+def _existing_job(db, pid, shot_id, request_id):
+    row = _request_job(db, pid, request_id)
+    if row is not None:
+        if json.loads(row['payload_json']).get('shot_id') != shot_id:
+            raise ValueError('Request id belongs to another shot')
+        _remember_alias(db, row, request_id)
+        return guided_compat.project_job(dict(row), db=db)
+    row = db.execute(
+        "SELECT * FROM jobs WHERE project_id=? AND target_key=? "
+        "AND status IN ('PENDING','RUNNING','PAUSED','BLOCKED') ORDER BY created DESC LIMIT 1",
+        (pid, f'shot:{shot_id}')).fetchone()
+    if row is not None:
+        if 'guided_request_id' not in json.loads(row['payload_json']):
+            raise ValueError('An earlier non-Guided job is unresolved')
+        _remember_alias(db, row, request_id)
+        return guided_compat.project_job(dict(row), db=db)
+
+
+def _request_job(db, pid, request_id):
+    row = db.execute('SELECT * FROM jobs WHERE project_id=? AND request_key=?',
+                     (pid, 'guided:' + request_id)).fetchone()
+    if row is not None:
+        return row
+    return db.execute(
+        "SELECT j.* FROM jobs j JOIN job_events e ON e.job_id=j.id "
+        "WHERE j.project_id=? AND e.type='guided_request_alias' "
+        "AND json_extract(e.data_json,'$.request_id')=? "
+        'ORDER BY j.created DESC LIMIT 1', (pid, request_id)).fetchone()
+
+
+def _remember_alias(db, job, request_id):
+    if request_id == json.loads(job['payload_json']).get('guided_request_id'):
+        return
+    exists = db.execute(
+        "SELECT 1 FROM job_events WHERE job_id=? AND type='guided_request_alias' "
+        "AND json_extract(data_json,'$.request_id')=?", (job['id'], request_id)).fetchone()
+    if not exists:
+        jobs.append_event(job['id'], 'guided_request_alias', {'request_id': request_id}, db=db)
+
+
 def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request_id: str) -> dict:
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Request id required')
+    with core.connect() as db:
+        shot = _shot(db, pid, seq)
+        existing = _existing_job(db, pid, shot['id'], request_id)
+        if existing:
+            return existing
     estimate = preview(pid, seq)
     first_frame = last_frame = None
     first_mime = last_mime = None
+    first_path = last_path = None
     if estimate['first_frame_id']:
         first_path = guided_images.image_path(pid, estimate['first_frame_id'])
         first_frame = first_path.read_bytes()
@@ -226,6 +381,9 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
             if existing['shot_id'] != shot['id']:
                 raise ValueError('Request id belongs to another shot')
             return dict(existing)
+        existing = _existing_job(db, pid, shot['id'], request_id)
+        if existing:
+            return existing
         active = db.execute("SELECT 1 FROM guided_attempts WHERE project_id=? AND shot_id=? AND status IN ('SUBMITTING','SUBMITTED','RUNNING','DOWNLOAD_PENDING')", (pid, shot['id'])).fetchone()
         if active:
             raise ValueError('An earlier attempt is unresolved; recover it before submitting again')
@@ -242,6 +400,24 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
         reserved = db.execute('SELECT COALESCE(SUM(reserved_usd),0) FROM guided_attempts WHERE project_id=?', (pid,)).fetchone()[0]
         if estimate['paid'] and reserved + estimate['estimated_cost_usd'] > p['budget'] + 1e-9:
             raise ValueError('Project budget insufficient')
+        if estimate['paid']:
+            if ledger.committed(pid, db=db) + ledger.to_micro(estimate['estimated_cost_usd']) > ledger.to_micro(p['budget']):
+                raise ValueError('Project budget insufficient')
+            run_id = job_runner.open_or_reuse_run(
+                pid, request_key=f'guided:{request_id}',
+                budget_microusd=ledger.to_micro(budget_usd), db=db)
+            job = job_runner.enqueue_shot(
+                pid, seq, run_id=run_id, provider=estimate['provider'], model=estimate['model'],
+                request_key=f'guided:{request_id}', db=db, guided_input={
+                    'guided_request_id': request_id,
+                    'first_frame_path': str(first_path) if first_path else None,
+                    'first_mime': first_mime,
+                    'last_frame_path': str(last_path) if last_path else None,
+                    'last_mime': last_mime,
+                    **{key: estimate[key] for key in ('first_frame_id', 'first_frame_sha256',
+                                                      'last_frame_id', 'last_frame_sha256')},
+                })
+            return guided_compat.project_job(job, db=db)
         db.execute('''INSERT INTO guided_attempts(id,project_id,shot_id,request_id,prompt,duration,provider,reserved_usd,status)
                       VALUES (?,?,?,?,?,?,?,?,?)''', (aid, pid, shot['id'], request_id, shot['prompt'], shot['duration'],
                                                     estimate['provider'], estimate['estimated_cost_usd'], 'SUBMITTING'))
@@ -263,15 +439,6 @@ def submit(pid: str, seq: int, budget_usd: float, *, confirm_paid: bool, request
         except Exception as exc:
             _update(pid, aid, status='FAILED', error=str(exc)[:500])
         return attempt(pid, aid)
-    try:
-        with httpx.Client(timeout=httpx.Timeout(40, connect=15), follow_redirects=False) as client:
-            provider = core.PROVIDERS[estimate['provider']](client)
-            remote = (provider.submit_i2v(shot['prompt'], shot['duration'], first_frame, first_mime, last_frame, last_mime)
-                      if first_frame is not None else provider.submit(shot['prompt'], shot['duration']))
-        _update(pid, aid, status='SUBMITTED', remote_id=remote)
-    except Exception as exc:
-        _update(pid, aid, error=str(exc)[:500])
-    return attempt(pid, aid)
 
 
 def _update(pid, aid, **values):
@@ -288,8 +455,45 @@ def _register(pid, aid, seq, target):
     _update(pid, aid, status='COMPLETED', file=str(target), asset_id=asset, error=None)
 
 
-def recover(pid: str, attempt_id: str, remote_id: str | None = None) -> dict:
+def recover(pid: str, attempt_id: str, remote_id: str | None = None, *,
+            confirm_checked: bool = False) -> dict:
     """Attach a user-verified ID or poll an existing task once; never submit."""
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        job = _job_for_action(db, pid, attempt_id)
+        if job:
+            _require_confirmation(confirm_checked)
+            _require_idle(job)
+            current = jobs.latest_attempt(job['id'], db=db)
+            if job['status'] in ('SUCCEEDED', 'FAILED', 'CANCELLED'):
+                return guided_compat.project_job(job, db=db)
+            if job['status'] == 'PAUSED' or job['pause_requested'] or job['cancel_requested']:
+                raise ValueError('Resume the paused/cancelled job before recovery')
+            if not current:
+                raise ValueError('Remote task ID requires an existing submitted attempt')
+            if remote_id is not None:
+                if not isinstance(remote_id, str) or not remote_id.strip():
+                    raise ValueError('Invalid remote id')
+                if current['remote_id']:
+                    if remote_id.strip() != current['remote_id']:
+                        raise ValueError('A different remote id is already attached')
+                else:
+                    current = attempt_store.attach_remote(current['id'], remote_id, db=db)
+            if not current['remote_id']:
+                raise ValueError('Remote task ID required; check provider dashboard before attaching')
+            if jobs.recovery_action(job['id'], db=db) != 'resume':
+                raise ValueError('Attempt cannot resume query/download')
+            owner = 'guided-recover:' + uuid4().hex
+            now, expiry = jobs._future(core.now(), 60)
+            db.execute("UPDATE jobs SET status='RUNNING',lease_owner=?,lease_expires=?,"
+                       "block_reason=NULL,error_class=NULL,error_detail=NULL,updated=? WHERE id=?",
+                       (owner, expiry, now, job['id']))
+            jobs.append_event(job['id'], 'guided_recover',
+                              {'remote_id': current['remote_id']}, attempt_id=current['id'], db=db)
+            job = jobs.get(job['id'], db=db)
+    if job:
+        _resume_job_once(job, current, owner)
+        return attempt(pid, attempt_id)
     state = attempt(pid, attempt_id)
     if state['status'] not in _ACTIVE:
         return state
@@ -333,3 +537,43 @@ def recover(pid: str, attempt_id: str, remote_id: str | None = None) -> dict:
     except Exception as exc:
         _update(pid, attempt_id, error=str(exc)[:500])
     return attempt(pid, attempt_id)
+
+
+def _resume_job_once(job, current, owner):
+    """Lease-fenced single recovery poll, with the worker's heartbeat semantics."""
+    from .handlers import video
+    stopped, lost = threading.Event(), threading.Event()
+
+    def beat():
+        while not stopped.wait(15):
+            if not jobs.heartbeat(job['id'], owner):
+                lost.set()
+                return
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        output = video.resume(job, current, worker.Control(lost), poll_once=True)
+        if lost.is_set():
+            raise jobs.LeaseLost('Worker no longer owns the job')
+        jobs.set_status(job['id'], 'SUCCEEDED' if output is not None else 'PENDING',
+                        output=output, owner=owner)
+    except jobs.LeaseLost:
+        jobs.append_event(job['id'], 'lease_lost', {'owner': owner})
+    except worker.JobBlocked as exc:
+        jobs.set_status(job['id'], 'BLOCKED', block_reason=exc.reason, owner=owner)
+    except worker.JobStopped as exc:
+        jobs.set_status(job['id'], 'PAUSED' if exc.action == 'pause' else 'CANCELLED', owner=owner)
+    except Exception as exc:
+        latest = jobs.latest_attempt(job['id'])
+        if latest['status'] in ('FAILED_FINAL', 'FAILED_RETRYABLE'):
+            jobs.set_status(job['id'], 'FAILED', error_detail=str(exc)[:500], owner=owner)
+        else:
+            if latest['status'] in attempt_store.ACTIVE:
+                attempt_store.mark_unknown(latest['id'], str(exc))
+            jobs.set_status(job['id'], 'BLOCKED', block_reason='unknown_remote',
+                            error_detail=str(exc)[:500], owner=owner)
+    finally:
+        stopped.set()
+        thread.join(timeout=2)
+        jobs.release(job['id'], owner)

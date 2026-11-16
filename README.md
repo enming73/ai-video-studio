@@ -7,10 +7,16 @@ calls for storyboard, narration, speech and reference images now also require an
 explicit per-call `--budget`; these reservations are not provider-enforced spend
 caps.
 
-**Project status (2026-11-09):** Development along the current direction is
-paused. Future work may explore finer production details and workflow design;
-the scope has not yet been decided. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)
-for current capabilities, verification limits, and safe resumption notes.
+**Project direction (2026-11-15):** The agreed product principle is **one-click
+complete draft → optional manual refinement → targeted regeneration → reliable
+export**. See [ROADMAP.md](ROADMAP.md) for the proposed milestones and acceptance
+gates, and [the development workflow](docs/development-workflow.md) for the
+implementation and verification process. The roadmap is planning guidance, not a
+claim that automatic production is already implemented. The roadmap is approved;
+[M0 local acceptance tooling](docs/acceptance/m0-baseline.md) is implemented,
+automated evidence recorded and accepted by the user within its documented local
+legacy-media scope. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
+and verification limits.
 
 This repository contains Studio, VBench, and their shared provider core. The
 v0.9.5 increment adds opt-in visual review of shot-to-shot continuity.
@@ -35,6 +41,9 @@ legacy workflows and caveats below originated in v0.2.
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
 - `ai-video-studio/`: Studio CLI and local visual editor with cloud task persistence and mock mode
 
+## architecture
+[![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/enming73/ai-video-studio?utm_source=readme&utm_medium=badge)
+
 ## Guided character and boundary-frame workflow
 
 New guided projects enable the character/first-frame stage. Review and confirm
@@ -51,13 +60,61 @@ access and current pricing before a paid request. Budget reservations are not
 provider-enforced spending caps. Flux uploads both boundary images to fal CDN;
 file URLs are publicly accessible by default.
 
-For an unresolved video request, check the provider dashboard before retrying.
-Use **恢复 / 查询任务** for a known remote ID instead of resubmitting. A
-downloaded result that exceeds the shot duration can be trimmed to the current
-shot length and saved as a new asset; the original is retained. A completed
-remote result awaiting download can also be explicitly ended to allow a new
-attempt; its history and budget reservation remain. A new generation can incur
-another charge. For details see [the guided workflow guide](docs/guided-workflow.md).
+### Persistent Guided video jobs (M1-D2)
+
+Paid Guided video generation now creates a durable Job and returns `QUEUED`.
+Run `uv run studio worker` from `ai-video-studio/`, or use `studio web` with its
+embedded worker, to execute it. Explicit paid confirmation and a sufficient
+positive budget are still required. Mock video generation remains synchronous.
+The Job stores the prompt, model and confirmed boundary-frame paths/provenance;
+new paid submissions do not write `guided_attempts`.
+
+`GET /api/projects/{pid}/guided/attempts` merges historical rows with Job
+projections. The existing fields remain available, including `reserved_usd`,
+`remote_id`, `file`, and `asset_id`; `created` is added (empty for undated legacy
+rows). The returned `id` is the Job ID until an attempt exists, then the latest
+attempt ID. Both IDs remain valid for lookup. Reusing a request ID returns the
+existing Job, including after completion; an unresolved shot is not submitted
+again. Completed outputs are registered as selectable assets when reconciled.
+
+For unknown submissions, check the provider dashboard before taking action.
+Recovery only attaches a verified remote ID or queries/downloads an existing
+remote task; it never submits a new paid request. New Job actions use:
+
+```text
+POST /api/projects/{pid}/guided/attempts/{id}/recover
+{"confirm_checked": true, "remote_id": "VERIFIED_PROVIDER_TASK_ID"}
+
+# Query a previously attached remote ID once:
+POST /api/projects/{pid}/guided/attempts/{id}/recover
+{"confirm_checked": true}
+
+# Trim a COMPLETED Job's file to the current shot duration:
+POST /api/projects/{pid}/guided/attempts/{id}/trim
+{"confirm_checked": true}
+
+# End an unknown attempt or pending download:
+POST /api/projects/{pid}/guided/attempts/{id}/abandon
+{"confirm_checked": true}
+```
+
+Trimming registers a new asset and preserves the original file, attempt output
+and cost entries. Abandonment retains reservations and history; remote work may
+continue and bill. A newly authorized generation may incur another charge.
+Legacy recover/trim behavior remains available for historical rows.
+
+**React compatibility:** the existing workspace polls active attempts (except
+blocked ones with an explicit error), sends `confirm_checked=true` after its
+existing confirmation dialogs, and offers abandon for unknown submissions.
+Mismatched downloads project as `DOWNLOAD_PENDING`; the trim button then salvages
+the downloaded file into a valid asset. Completed-Job trimming remains available
+through the confirmed API, but a completed result already matches the shot
+duration. `PAUSED` still has no legacy status mapping and returns an explicit
+compatibility error; inspect/resume it through the Job API.
+
+Automated coverage uses fake providers and local media; real paid UI generation
+and real-provider recovery have not been verified. Image, LLM, TTS and vision
+paths are outside D2. See also [the guided workflow guide](docs/guided-workflow.md).
 
 ## Install
 ```bash
@@ -253,6 +310,23 @@ provider's final bill. Job status is held in memory and is lost on API restart;
 underlying submission state remains in SQLite. Never blindly resubmit an
 ambiguous submission. See [the v0.9.3 guide](README-v0.9.3.md).
 
+## Persistent job worker
+
+```bash
+cd ai-video-studio
+uv run studio worker --once          # process one queued job and exit
+uv run studio worker                 # run until interrupted
+uv run studio jobs PROJECT_ID
+uv run studio job JOB_ID
+uv run studio pause JOB_ID
+uv run studio resume JOB_ID
+uv run studio cancel JOB_ID
+```
+
+Jobs and attempts are stored in SQLite; the worker claims them with a lease and heartbeats until the handler finishes. A lease can be reclaimed after expiry, but an attempt that may already have reached a provider (`SUBMITTING` without a remote id) is blocked as unknown and is never submitted again automatically. Pausing a running job records a request and stops at the next checkpoint; it does not claim that the remote task stopped. Cancelling has the same limitation for already submitted remote work.
+
+M1-C includes a video handler pilot but does not yet route the existing CLI/UI paid commands through it; that integration is M1-D.
+
 ## Tests
 ```bash
 cd ai-video-studio && uv run --extra dev pytest -q
@@ -363,3 +437,13 @@ describe their release and may have been addressed by later increments.
 | [v0.9.3](README-v0.9.3.md) | Browser project creation, planning, cost preview and explicitly confirmed background cloud generation. |
 | [v0.9.4](README-v0.9.4.md) | Offline side-by-side shot-boundary evidence and human continuity review. |
 | [v0.9.5](README-v0.9.5.md) | Opt-in visual continuity assessment and proposed prompt revisions with budget estimates. |
+
+## Persistent generation API
+
+Legacy cloud generation now creates persistent jobs. The API exposes
+`GET /api/projects/{PID}/jobs`, `GET /api/jobs/{JOB_ID}`,
+`POST /api/jobs/{JOB_ID}/pause|resume|cancel` and
+`GET /api/projects/{PID}/costs`. `POST /api/projects/{PID}/production/generate`
+still requires explicit paid confirmation and a run budget; Dry Run never creates
+jobs. `studio web` starts an embedded worker unless
+`STUDIO_DISABLE_EMBEDDED_WORKER=1`. Job state and costs survive API restarts.
