@@ -561,6 +561,79 @@ def test_trim_preserves_original_and_reservation(project, monkeypatch):
     assert json.loads(jobs.get(job['id'])['output_json'])['original_file'] == str(source)
 
 
+def test_trim_recovers_blocked_download(project, monkeypatch):
+    import hashlib
+    from studio import attempts, jobs, worker
+    from studio.handlers import video
+    from video_provider_core import CostEstimate, RemoteJob, RemoteStatus
+    pid, _ = project
+    with core.connect() as db:
+        db.execute("UPDATE projects SET provider='minimax' WHERE id=?", (pid,))
+        db.execute('UPDATE shots SET duration=6 WHERE project_id=? AND seq=1', (pid,))
+    monkeypatch.setenv('MINIMAX_USD_PER_SECOND', '0.1')
+    queued = generation.submit(pid, 1, 2, confirm_paid=True, request_id='long-download')
+    job = jobs.get(queued['id'])
+    class Provider:
+        def __init__(self, client): pass
+        def estimate_cost(self, request):
+            return CostEstimate(1_000_000, 'test:v1', 'test')
+        def submit_video(self, request, key):
+            return RemoteJob('minimax', 'known')
+        def status(self, remote, *, model=None):
+            return RemoteStatus('succeeded', url='https://example.test/video')
+    monkeypatch.setitem(video.PROVIDERS, 'minimax', Provider)
+    monkeypatch.setitem(worker.HANDLERS, 'video', video)
+    def download(client, url, target):
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=size=64x64:rate=24',
+                        '-t', '8', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(target)], check=True)
+    monkeypatch.setattr(video, 'download', download)
+    def verify(path, expected):
+        actual = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+                                                'format=duration', '-of', 'default=nw=1:nk=1',
+                                                str(path)], text=True))
+        if abs(actual - expected) > 0.25:
+            raise RuntimeError(f'Invalid clip duration: expected {expected}s, got {actual:.3f}s')
+    monkeypatch.setattr(core, 'verify_video', verify)
+    assert worker.run_once() == job['id']
+    blocked = jobs.get(job['id'])
+    current = attempts.list_for_job(job['id'])[0]
+    assert blocked['status'] == 'BLOCKED' and blocked['block_reason'] == 'download_failed'
+    assert current['status'] == 'VALIDATING'
+    with core.connect() as db:
+        event = db.execute("SELECT data_json FROM job_events WHERE job_id=? AND type='download_ready'",
+                           (job['id'],)).fetchone()
+        costs = [dict(row) for row in db.execute('SELECT * FROM cost_entries')]
+    source = Path(json.loads(event['data_json'])['file'])
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    projected = generation.attempt(pid, job['id'])
+    assert projected['status'] == 'DOWNLOAD_PENDING'
+    assert projected['error'] == 'download_failed'
+    trimmed = generation.trim_pending(pid, current['id'], confirm_checked=True)
+    assert trimmed['status'] == 'COMPLETED'
+    assert trimmed['file'] != str(source)
+    assert jobs.get(job['id'])['status'] == 'SUCCEEDED'
+    assert attempts.get(current['id'])['status'] == 'COMPLETED'
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    assert trimmed['asset_id'] in [asset['id'] for asset in timeline.assets(pid, 1)]
+    duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                            '-of', 'default=nw=1:nk=1', trimmed['file']], text=True))
+    assert abs(duration - 6) < 0.25
+    with core.connect() as db:
+        assert [dict(row) for row in db.execute('SELECT * FROM cost_entries')] == costs
+
+
+def test_legacy_unknown_attempt_can_be_abandoned(project):
+    pid, _ = project
+    _pending_attempt(pid, core.HOME)
+    with core.connect() as db:
+        db.execute("UPDATE guided_attempts SET status='SUBMITTING',video_url=NULL WHERE id=?",
+                   ('a'*32,))
+    result = generation.abandon_pending(pid, 'a'*32, confirm_checked=True)
+    assert result['status'] == 'ABANDONED'
+    assert result['reserved_usd'] == 1.2
+    assert generation.abandon_pending(pid, 'a'*32, confirm_checked=True) == result
+
+
 def test_job_actions_require_explicit_confirmation(project, monkeypatch):
     job, original = _paid_attempt(project, monkeypatch)
     for action in (generation.recover, generation.trim_pending, generation.abandon_pending):

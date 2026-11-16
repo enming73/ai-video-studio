@@ -103,15 +103,14 @@ and cost entries. Abandonment retains reservations and history; remote work may
 continue and bill. A newly authorized generation may incur another charge.
 Legacy recover/trim behavior remains available for historical rows.
 
-**Current React compatibility limits:** D2 does not change React. It displays the
-projected status text and existing fields, but does not automatically poll queued
-video jobs: reload/re-enter the project to refresh results. Its recover/trim
-buttons omit `confirm_checked`, so new Job actions explicitly return HTTP 400
-until the caller supplies that field. Its trim/abandon buttons are shown only for
-`DOWNLOAD_PENDING`; completed-Job trimming and unknown-attempt abandonment are
-available through the confirmed API calls above. `PAUSED` has no legacy status
-mapping and returns an explicit compatibility error; inspect/resume it through
-the Job API. These UI gaps require a later frontend change.
+**React compatibility:** the existing workspace polls active attempts (except
+blocked ones with an explicit error), sends `confirm_checked=true` after its
+existing confirmation dialogs, and offers abandon for unknown submissions.
+Mismatched downloads project as `DOWNLOAD_PENDING`; the trim button then salvages
+the downloaded file into a valid asset. Completed-Job trimming remains available
+through the confirmed API, but a completed result already matches the shot
+duration. `PAUSED` still has no legacy status mapping and returns an explicit
+compatibility error; inspect/resume it through the Job API.
 
 Automated coverage uses fake providers and local media; real paid UI generation
 and real-provider recovery have not been verified. Image, LLM, TTS and vision

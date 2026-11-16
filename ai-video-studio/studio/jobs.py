@@ -14,7 +14,8 @@ _TRANSITIONS = {
     'PENDING': {'RUNNING', 'PAUSED', 'CANCELLED', 'FAILED'},
     'RUNNING': {'PENDING', 'PAUSED', 'CANCELLED', 'SUCCEEDED', 'FAILED', 'BLOCKED'},
     'PAUSED': {'PENDING', 'CANCELLED', 'FAILED', 'BLOCKED'},
-    **{status: set() for status in TERMINAL},
+    'BLOCKED': {'SUCCEEDED'},
+    **{status: set() for status in TERMINAL if status != 'BLOCKED'},
 }
 
 

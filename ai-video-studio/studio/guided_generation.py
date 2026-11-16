@@ -127,9 +127,18 @@ def abandon_pending(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict
             jobs.append_event(job['id'], 'guided_abandoned',
                               {'warning': 'remote may continue and bill'}, attempt_id=current['id'], db=db)
             return guided_compat.project_job(jobs.get(job['id'], db=db), db=db)
-        result = db.execute("UPDATE guided_attempts SET status='ABANDONED' WHERE project_id=? AND id=? AND status='DOWNLOAD_PENDING' AND video_url IS NOT NULL", (pid, attempt_id))
-        if result.rowcount != 1:
-            raise ValueError('Only a completed remote result awaiting download can be ended')
+        row = db.execute('SELECT status,video_url FROM guided_attempts WHERE project_id=? AND id=?',
+                         (pid, attempt_id)).fetchone()
+        if row is None:
+            raise ValueError('Unknown attempt')
+        if row['status'] == 'ABANDONED':
+            pass
+        elif row['status'] == 'SUBMITTING' or (
+                row['status'] == 'DOWNLOAD_PENDING' and row['video_url']):
+            db.execute("UPDATE guided_attempts SET status='ABANDONED' WHERE project_id=? AND id=?",
+                       (pid, attempt_id))
+        else:
+            raise ValueError('Only an unknown or completed remote result awaiting download can be ended')
     return attempt(pid, attempt_id)
 
 
@@ -207,16 +216,23 @@ def _require_idle(job):
 def _trim_job(db, job):
     _require_idle(job)
     state = guided_compat.project_job(job, db=db)
-    if state['status'] != 'COMPLETED' or not state['file']:
-        raise ValueError('Only a completed Job with a file can be trimmed')
+    current = jobs.latest_attempt(job['id'], db=db)
     shot = db.execute('SELECT * FROM shots WHERE project_id=? AND id=? AND archived=0',
                       (job['project_id'], state['shot_id'])).fetchone()
     if not shot:
         raise ValueError('Only an active shot can be trimmed')
     output = json.loads(job['output_json'] or '{}')
+    if state['status'] == 'DOWNLOAD_PENDING' and current and current['status'] in ('DOWNLOADING', 'VALIDATING'):
+        event = db.execute(
+            "SELECT data_json FROM job_events WHERE job_id=? AND type='download_ready' "
+            'ORDER BY created DESC,rowid DESC LIMIT 1', (job['id'],)).fetchone()
+        if event:
+            output.update(json.loads(event['data_json']))
+    if state['status'] not in ('COMPLETED', 'DOWNLOAD_PENDING') or not output.get('file'):
+        raise ValueError('Only a completed or pending downloaded Job can be trimmed')
     if output.get('guided_trim_duration') == shot['duration']:
         return state
-    source = Path(state['file']).resolve()
+    source = Path(output['file']).resolve()
     if not source.is_relative_to((core.HOME / job['project_id']).resolve()) or not source.is_file():
         raise ValueError('Invalid completed video file')
     probe = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
@@ -239,10 +255,15 @@ def _trim_job(db, job):
     output.update(file=str(target), asset_id=asset, sha256=timeline._hash(target),
                   original_file=output.get('original_file', str(source)),
                   guided_trim_duration=shot['duration'])
-    db.execute('UPDATE jobs SET output_json=?,updated=? WHERE id=?',
-               (json.dumps(output), core.now(), job['id']))
     jobs.append_event(job['id'], 'guided_trimmed', {'file': str(target), 'asset_id': asset,
                                                   'duration': shot['duration']}, db=db)
+    if current and current['status'] in ('DOWNLOADING', 'VALIDATING'):
+        attempt_store.mark_completed(current['id'], output, db=db)
+    if job['status'] == 'BLOCKED':
+        jobs.set_status(job['id'], 'SUCCEEDED', output=output, db=db)
+    else:
+        db.execute('UPDATE jobs SET output_json=?,updated=? WHERE id=?',
+                   (json.dumps(output), core.now(), job['id']))
     return guided_compat.project_job(jobs.get(job['id'], db=db), db=db)
 
 

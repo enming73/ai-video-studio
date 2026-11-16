@@ -13,7 +13,7 @@ from video_provider_core import (
 )
 from video_provider_core.media import download
 
-from .. import core, attempts as attempt_store, ledger
+from .. import core, attempts as attempt_store, jobs, ledger
 
 MAX_FRAME_BYTES = 20 * 1024 * 1024
 
@@ -113,17 +113,22 @@ def _finish(job, attempt, payload, provider, control, client, *, poll_once=False
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         download(client, status.url, target)
-        if attempt['status'] == 'DOWNLOADING':
-            attempt_store.mark_status(attempt['id'], 'VALIDATING')
-        core.verify_video(target, payload['duration_sec'])
     except Exception:
         # Keep the remote id and attempt state so recovery can download again.
         control.block('download_failed')
+    if attempt['status'] == 'DOWNLOADING':
+        attempt_store.mark_status(attempt['id'], 'VALIDATING')
     output = {
         'file': str(target),
         'remote_id': remote_id,
         'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
     }
+    try:
+        core.verify_video(target, payload['duration_sec'])
+    except Exception:
+        # Preserve the downloaded file for an explicit trim/recovery action.
+        jobs.append_event(job['id'], 'download_ready', output, attempt_id=attempt['id'])
+        control.block('download_failed')
     attempt_store.mark_completed(attempt['id'], output)
     return output
 

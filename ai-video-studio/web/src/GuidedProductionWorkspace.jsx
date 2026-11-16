@@ -32,6 +32,14 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
   const [boundaryId, setBoundaryId] = useState(null), [structure, setStructure] = useState(null);
   const [videoProvider, setVideoProvider] = useState('minimax');
   const root = `/projects/${encodeURIComponent(pid)}/guided`;
+  const activeAttemptKey = attempts
+    .filter(a => ['QUEUED','SUBMITTING','SUBMITTED','DOWNLOAD_PENDING'].includes(a.status) && !a.error)
+    .map(a => `${a.id}:${a.status}`).join('|');
+  useEffect(() => {
+    if (!activeAttemptKey) return;
+    const timer = setInterval(() => call(root + '/attempts').then(setAttempts).catch(e => setMessage(e.message)), 3000);
+    return () => clearInterval(timer);
+  }, [pid, activeAttemptKey]);
   const refresh = async (preserveDraft = false) => {
     const [s, p, a, jobs, plans] = await Promise.all([
       call(root + '/'), call(`/projects/${encodeURIComponent(pid)}`), call(`/projects/${encodeURIComponent(pid)}/assets`),
@@ -175,15 +183,14 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
             {!a.remote_id && <input placeholder="供应商后台核实的任务 ID" value={remote} onChange={e=>setRemote(e.target.value)} />}
             <button disabled={busy || (!a.remote_id && !remote.trim())} onClick={()=>run(async()=>{
               if(!a.remote_id && !window.confirm('确认已在供应商后台核实此任务 ID？'))return;
-              await call(root+`/attempts/${a.id}/recover`,'POST',{remote_id:a.remote_id?null:remote});setRemote('');await refresh();onPlanned?.();})}>恢复 / 查询任务</button>
-            {a.status==='DOWNLOAD_PENDING'&&<>
-              <button disabled={busy} onClick={()=>run(async()=>{
-                if(!window.confirm(`将已下载的视频裁剪为当前镜头长度 ${shot.duration} 秒？原文件会保留，尾部内容会被剪掉。`))return;
-                await call(root+`/attempts/${a.id}/trim`,'POST',{});await refresh();onPlanned?.();})}>裁剪至当前镜头长度并保存</button>
-              <button disabled={busy} onClick={()=>run(async()=>{
-                if(!window.confirm('结束这个旧任务并允许重新生成？原视频、任务记录和费用预留会保留；重新生成可能再次收费。'))return;
-                await call(root+`/attempts/${a.id}/abandon`,'POST',{confirm_checked:true});await refresh();onPlanned?.();})}>结束旧任务，允许重生成</button>
-            </>}</>}</div>)}
+              await call(root+`/attempts/${a.id}/recover`,'POST',{remote_id:a.remote_id?null:remote,confirm_checked:true});setRemote('');await refresh();onPlanned?.();})}>恢复 / 查询任务</button>
+            {a.status==='DOWNLOAD_PENDING'&&<button disabled={busy} onClick={()=>run(async()=>{
+              if(!window.confirm(`将已下载的视频裁剪为当前镜头长度 ${shot.duration} 秒？原文件会保留，尾部内容会被剪掉。`))return;
+              await call(root+`/attempts/${a.id}/trim`,'POST',{confirm_checked:true});await refresh();onPlanned?.();})}>裁剪至当前镜头长度并保存</button>}
+            {(a.status==='DOWNLOAD_PENDING' || (a.status==='SUBMITTING' && a.error)) && <button disabled={busy} onClick={()=>run(async()=>{
+              if(!window.confirm('结束这个未决任务并允许重新生成？原视频、任务记录和费用预留会保留；重新生成可能再次收费。'))return;
+              await call(root+`/attempts/${a.id}/abandon`,'POST',{confirm_checked:true});await refresh();onPlanned?.();})}>结束旧任务，允许重生成</button>}
+          </>}</div>)}
         <button disabled={busy || !shot.asset_id || prompt!==shot.prompt} onClick={()=>run(async()=>{
           const updated=await call(root+`/shots/${seq}/confirm`,'POST',{asset_id:shot.asset_id,revision:state.revision});setState(updated);
           const next=updated.shots.find(s=>!s.confirmed);if(next)setSeq(next.seq);onPlanned?.();})}>确认此镜头并继续</button>
