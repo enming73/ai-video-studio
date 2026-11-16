@@ -2,16 +2,21 @@
 
 The estimated charge is a user-provided conservative *per-shot ceiling*, not
 provider pricing. Never issues generation requests or changes asset selections.
+
+Live reviews are persistent Jobs: ``review`` enqueues one ``vision_review`` Job
+per selected shot, runs them through the worker, then assembles the report.
+``execute_shot`` performs the single provider POST and raises the shared
+``vision_jobs`` exception classes so the handler can classify outcomes.
 """
 from __future__ import annotations
 import base64
 import json
 import os
 import re
-import uuid
+import tempfile
 from pathlib import Path
 import httpx
-from . import core, director
+from . import core, director, vision_jobs
 
 SYSTEM = '''You are a cautious film continuity reviewer. Compare the supplied ordered
 frames with the storyboard prompt. Do not infer motion from a single still.
@@ -20,6 +25,12 @@ action_match, visual_quality (each integer 0..5 or null), findings (list of
 short factual observations), uncertainty (string), recommendation (one of
 keep, manual_review, regenerate_candidate). Treat weak evidence as manual_review.
 Do not claim to have seen frames outside those supplied.'''
+
+NOTE = ('Per-shot ceiling is a user supplied reservation, NOT a verified '
+        'provider price. Actual billing may differ.')
+
+_UNKNOWN_ERRORS = (httpx.HTTPError, OSError, ValueError, KeyError,
+                   IndexError, TypeError)
 
 
 def normalize(raw):
@@ -61,48 +72,134 @@ def _image_payload(frame, root):
              base64.b64encode(path.read_bytes()).decode('ascii')}}
 
 
-def review(pid,report_id,model,base_url=None,live=False,budget_usd=0,
-           per_shot_ceiling_usd=0.10,shots=None,api_key=None,timeout=90):
-    selected=set(shots) if shots is not None else None
-    base,targets,estimate=plan(pid,report_id,per_shot_ceiling_usd,budget_usd,selected)
-    result={'schema_version':1,'source_report_id':report_id,'project_id':pid,
-            'mode':'vision_live' if live else 'vision_dry_run','model':model,
-            'budget':estimate,'paid_api_calls':0,'results':[],
-            'note':'Per-shot ceiling is a user supplied reservation, NOT a verified provider price. Actual billing may differ.'}
-    if not live: return result
-    if not estimate['within_budget']: raise ValueError('Budget insufficient: no requests made')
-    if not model: raise ValueError('Model is required')
-    key=api_key or os.environ.get('OPENAI_API_KEY')
-    if not key: raise ValueError('OPENAI_API_KEY missing')
-    endpoint=(base_url or os.environ.get('OPENAI_BASE_URL') or 'https://api.openai.com/v1').rstrip('/')
-    if not endpoint.startswith('https://') and not re.match(r'^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)',endpoint):
-        raise ValueError('Only HTTPS or local HTTP endpoints allowed')
-    report_root=core.HOME/pid/'director-reports'/report_id
-    output_root=core.HOME/pid/'director-reviews'/uuid.uuid4().hex[:12]
-    output_root.mkdir(parents=True,exist_ok=False)
-    result['review_id']=output_root.name
-    with httpx.Client(timeout=timeout) as client:
-        for shot in targets:
-            try:
-                content=[{'type':'text','text':f"Shot {shot['seq']}. Storyboard prompt: {shot['prompt']}. Frames in chronological order:"}]
-                content += [_image_payload(f,report_root) for f in shot['frames']]
-                response=client.post(endpoint+'/chat/completions',headers={'Authorization':'Bearer '+key},
-                    json={'model':model,'messages':[{'role':'system','content':SYSTEM},
-                        {'role':'user','content':content}],'temperature':0,'max_tokens':750})
-                response.raise_for_status()
-                data=response.json()
-                raw=data['choices'][0]['message']['content']
-                if isinstance(raw,list): raw=''.join(x.get('text','') for x in raw if isinstance(x,dict))
-                raw=raw.strip()
-                if raw.startswith('```'):
-                    raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw)
-                judgement=normalize(json.loads(raw))
-                result['results'].append({'seq':shot['seq'],'status':'reviewed','review':judgement,
-                    'usage':data.get('usage',{}),'source_asset_id':shot['asset_id']})
-            except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError) as exc:
-                result['results'].append({'seq':shot['seq'],'status':'error','error':str(exc)[:300]})
-            finally:
-                # Record attempts even when response fails: provider may still charge.
-                result['paid_api_calls']+=1
-                (output_root/'review.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
-    return result
+def _post(endpoint, key, model, content):
+    with httpx.Client(timeout=90) as client:
+        response = client.post(
+            endpoint + '/chat/completions',
+            headers={'Authorization': 'Bearer ' + key},
+            json={'model': model,
+                  'messages': [{'role': 'system', 'content': SYSTEM},
+                               {'role': 'user', 'content': content}],
+                  'temperature': 0, 'max_tokens': 750})
+        response.raise_for_status()
+        return response.json()
+
+
+def _judgement(raw):
+    if isinstance(raw, list):
+        raw = ''.join(x.get('text', '') for x in raw if isinstance(x, dict))
+    if not isinstance(raw, str):
+        raise ValueError('Model returned a non-text judgement')
+    raw = raw.strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+    return normalize(json.loads(raw))
+
+
+def execute_shot(payload):
+    """Perform the single provider POST for one shot and normalize its review."""
+    pid = payload['project_id']
+    report_id = payload['report_id']
+    model = payload['model']
+    key = os.environ.get('OPENAI_API_KEY')
+    if not key:
+        raise vision_jobs.PreRequestFailure('OPENAI_API_KEY missing')
+    endpoint = (payload.get('base_url') or os.environ.get('OPENAI_BASE_URL')
+                or 'https://api.openai.com/v1').rstrip('/')
+    if not endpoint.startswith('https://') and not re.match(
+            r'^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)', endpoint):
+        raise vision_jobs.PreRequestFailure('Only HTTPS or local HTTP endpoints allowed')
+    report_root = core.HOME / pid / 'director-reports' / report_id
+    content = [{'type': 'text', 'text':
+                f"Shot {payload['seq']}. Storyboard prompt: {payload['prompt']}. "
+                'Frames in chronological order:'}]
+    try:
+        for frame_path in payload['frames']:
+            content.append(_image_payload({'file': frame_path}, report_root))
+    except ValueError as exc:
+        raise vision_jobs.PreRequestFailure(str(exc)) from exc
+    try:
+        data = _post(endpoint, key, model, content)
+        raw = data['choices'][0]['message']['content']
+    except _UNKNOWN_ERRORS as exc:
+        raise vision_jobs.UnknownRemote(str(exc)) from exc
+    try:
+        judgement = _judgement(raw)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise vision_jobs.PostResponseFailure(str(exc)) from exc
+    return {'seq': payload['seq'], 'status': 'reviewed', 'review': judgement,
+            'usage': data.get('usage', {}),
+            'source_asset_id': payload['source_asset_id']}
+
+
+def _atomic_write(target: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix='.review-',
+                               suffix='.json')
+    os.close(fd)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        os.replace(tmp, str(target))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def assemble(pid, jobs, *, report_id, model, base_url, estimate, review_id,
+             run_id, request_id) -> dict:
+    """Build the report shape from finished Jobs and persist it atomically."""
+    ordered = sorted(jobs, key=lambda j: json.loads(j['payload_json'])['seq'])
+    results = []
+    for job in ordered:
+        payload = json.loads(job['payload_json'])
+        if job['status'] == 'SUCCEEDED':
+            results.append(json.loads(job['output_json'] or '{}'))
+        else:
+            detail = (job.get('error_detail') or job.get('error_class')
+                      or job.get('block_reason') or job['status'])
+            results.append({'seq': payload['seq'], 'status': 'error',
+                            'error': str(detail)[:300]})
+    report = {
+        'schema_version': 1,
+        'source_report_id': report_id,
+        'project_id': pid,
+        'mode': 'vision_live',
+        'model': model,
+        'budget': estimate,
+        'paid_api_calls': len(jobs),
+        'results': results,
+        'note': NOTE,
+        'review_id': review_id,
+        'run_id': run_id,
+        'job_ids': [j['id'] for j in ordered],
+        'request_id': request_id,
+        'partial': any(r['status'] == 'error' for r in results),
+    }
+    output_root = core.HOME / pid / 'director-reviews' / review_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    _atomic_write(output_root / 'review.json',
+                  json.dumps(report, ensure_ascii=False, indent=2))
+    return report
+
+
+def review(pid, report_id, model, base_url=None, live=False, budget_usd=0,
+           per_shot_ceiling_usd=0.10, shots=None, request_id=None):
+    selected = set(shots) if shots is not None else None
+    base, targets, estimate = plan(pid, report_id, per_shot_ceiling_usd,
+                                   budget_usd, selected)
+    result = {'schema_version': 1, 'source_report_id': report_id,
+              'project_id': pid,
+              'mode': 'vision_live' if live else 'vision_dry_run',
+              'model': model, 'budget': estimate, 'paid_api_calls': 0,
+              'results': [], 'note': NOTE}
+    if not live:
+        return result
+    from . import job_runner
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, model, base_url, budget_usd, per_shot_ceiling_usd,
+        selected, request_id)
+    states = job_runner.run_until(queued['job_ids'])
+    return assemble(pid, states, report_id=report_id, model=model,
+                    base_url=base_url, estimate=estimate,
+                    review_id=queued['review_id'], run_id=queued['run_id'],
+                    request_id=queued['request_id'])
