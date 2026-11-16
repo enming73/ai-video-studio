@@ -178,6 +178,7 @@ def test_storyboard_worker_saves_draft_and_completes(guided_storyboard_job, monk
     from studio.handlers import register_all
     register_all()
     pid = guided_storyboard_job['project_id']
+    monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
     monkeypatch.setattr(gs, 'generate_draft', lambda payload: DRAFT)
     assert worker.run_once() == guided_storyboard_job['id']
     assert guided_compat.find_plan(pid, 'new')['status'] == 'COMPLETED'
@@ -191,6 +192,7 @@ def test_storyboard_job_rejects_stale_revision_without_overwrite(guided_storyboa
     from studio.handlers import register_all
     register_all()
     pid = guided_storyboard_job['project_id']
+    monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
     monkeypatch.setattr(gs, 'generate_draft', lambda payload: DRAFT)
     with core.connect() as db:
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
@@ -198,6 +200,38 @@ def test_storyboard_job_rejects_stale_revision_without_overwrite(guided_storyboa
     assert jobs.get(guided_storyboard_job['id'])['status'] == 'FAILED'
     from studio import guided_workflow
     assert guided_workflow.get(pid)['draft'] is None
+
+
+def test_storyboard_missing_key_fails_without_attempt_or_cost(guided_storyboard_job, monkeypatch):
+    from studio.handlers import register_all
+    register_all()
+    pid = guided_storyboard_job['project_id']
+    monkeypatch.delenv('STUDIO_LLM_API_KEY', raising=False)
+    monkeypatch.setattr(core, '_llm_json', lambda *a: pytest.fail('no request without a key'))
+    assert worker.run_once() == guided_storyboard_job['id']
+    assert jobs.get(guided_storyboard_job['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM job_attempts WHERE job_id=?',
+                          (guided_storyboard_job['id'],)).fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM cost_entries WHERE job_id=?',
+                          (guided_storyboard_job['id'],)).fetchone()[0] == 0
+
+
+def test_storyboard_invalid_response_marks_failed_final_and_reserves(guided_storyboard_job, monkeypatch):
+    from studio.handlers import register_all
+    register_all()
+    pid = guided_storyboard_job['project_id']
+    monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
+    monkeypatch.setattr(core, '_llm_json', lambda *a: {})
+    assert worker.run_once() == guided_storyboard_job['id']
+    assert jobs.get(guided_storyboard_job['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        attempt = db.execute('SELECT status FROM job_attempts WHERE job_id=?',
+                             (guided_storyboard_job['id'],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        entry = db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                           (guided_storyboard_job['id'],)).fetchone()
+        assert entry['billing_status'] == 'reserved'
 
 
 def test_resolve_plan_requires_confirmation_and_acknowledges(guided_storyboard_job):

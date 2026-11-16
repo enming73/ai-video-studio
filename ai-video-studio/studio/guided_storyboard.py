@@ -5,6 +5,8 @@ import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from dotenv import load_dotenv
+
 from . import core, provider_capabilities
 
 _MODELS = {'mock': 'mock', 'minimax': 'MiniMax-H3', 'wan': 'wan3.0-video',
@@ -37,6 +39,21 @@ def preview(pid: str, model: str, shot_length: int | None = None) -> dict:
             'fixed_durations': fixed,
             'estimated_cost_usd': None, 'paid_request': False,
             'note': 'Reservation is not a provider-enforced spending cap.'}
+
+
+def require_llm_config(base_url: str | None = None) -> None:
+    """Fail fast, before any attempt or reservation, when the LLM cannot be reached.
+
+    A missing API key or an insecure endpoint is deterministic: no request has
+    been (or will be) sent, so no attempt or cost entry should exist. The
+    worker turns this raised ``ValueError`` into a plain ``FAILED`` Job.
+    """
+    load_dotenv()
+    if not os.getenv('STUDIO_LLM_API_KEY'):
+        raise ValueError('Set STUDIO_LLM_API_KEY (no paid request made)')
+    base = base_url or os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1')
+    if not base.startswith('https://') and not os.getenv('STUDIO_ALLOW_HTTP_LLM'):
+        raise ValueError('LLM endpoint must use HTTPS (or set STUDIO_ALLOW_HTTP_LLM=1 for local use)')
 
 
 def generate_draft(payload: dict) -> dict:

@@ -11,7 +11,8 @@ import math
 
 from . import core, job_runner, jobs, ledger
 
-UNRESOLVED = ('PENDING', 'RUNNING', 'PAUSED', 'BLOCKED')
+REUSABLE_STATUSES = ('PENDING', 'RUNNING', 'PAUSED')
+REUSABLE_BLOCK_REASON = 'unknown_remote'
 
 
 def _find_by_key(conn, pid, request_key):
@@ -79,10 +80,17 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
                 raise ValueError('Request id belongs to another operation')
             return existing
         if target_key is not None:
+            # Reuse only genuinely unresolved targets. A BLOCKED Job is only
+            # unresolved when the provider outcome is unknown; budget/auth
+            # blocks are terminal from the caller's view and a new request must
+            # be able to create a fresh Job once the budget is raised.
+            placeholders = ','.join('?' for _ in REUSABLE_STATUSES)
             unresolved = db.execute(
                 'SELECT * FROM jobs WHERE project_id=? AND target_key=? '
-                f"AND status IN ({','.join('?' for _ in UNRESOLVED)}) "
-                'ORDER BY created DESC LIMIT 1', (pid, target_key, *UNRESOLVED)).fetchone()
+                f'AND (status IN ({placeholders}) '
+                "OR (status='BLOCKED' AND block_reason=?)) "
+                'ORDER BY created DESC LIMIT 1',
+                (pid, target_key, *REUSABLE_STATUSES, REUSABLE_BLOCK_REASON)).fetchone()
             if unresolved is not None:
                 job = dict(unresolved)
                 _remember_alias(db, job, request_id)

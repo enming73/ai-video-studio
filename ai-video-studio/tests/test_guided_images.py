@@ -107,6 +107,54 @@ def test_image_timeout_blocks_unknown_without_resubmit(tmp_path, monkeypatch):
                                      request_id='retry', revision=revision)
 
 
+def test_invalid_provider_image_fails_with_reserved_cost(tmp_path, monkeypatch):
+    from studio import image_jobs, jobs, request_jobs, worker
+    from studio.handlers import register_all
+    register_all()
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('An elephant in a forest', 10, 'mock', 5)
+    workflow.create(pid, character_stage_enabled=True)
+    state = roles.save_character(pid, None, 'Luma', 'Small gray elephant', 0)
+    character_id, revision = state['characters'][0]['id'], state['revision']
+    images.generate_character(pid, character_id, MODEL, 1, confirm_paid=True, request_id='a', revision=revision)
+    job = request_jobs.find(pid, kind='image', request_id='a')
+    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    monkeypatch.setattr(image_jobs, '_request_image', lambda *a, **k: b'not a png')
+    assert worker.run_once() == job['id']
+    assert jobs.get(job['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        entry = db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                           (job['id'],)).fetchone()
+        assert entry['billing_status'] == 'reserved'
+        attempt = db.execute('SELECT status, error_class FROM job_attempts WHERE job_id=?',
+                             (job['id'],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        assert attempt['error_class'] == 'content_rejected'
+        assert db.execute('SELECT COUNT(*) FROM job_attempts WHERE job_id=?',
+                          (job['id'],)).fetchone()[0] == 1
+
+
+def test_image_missing_key_fails_and_releases(tmp_path, monkeypatch):
+    from studio import jobs, request_jobs, worker
+    from studio.handlers import register_all
+    register_all()
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('An elephant in a forest', 10, 'mock', 5)
+    workflow.create(pid, character_stage_enabled=True)
+    state = roles.save_character(pid, None, 'Luma', 'Small gray elephant', 0)
+    character_id, revision = state['characters'][0]['id'], state['revision']
+    images.generate_character(pid, character_id, MODEL, 1, confirm_paid=True, request_id='a', revision=revision)
+    job = request_jobs.find(pid, kind='image', request_id='a')
+    monkeypatch.delenv('STUDIO_IMAGE_API_KEY', raising=False)
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    assert worker.run_once() == job['id']
+    assert jobs.get(job['id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        entry = db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                           (job['id'],)).fetchone()
+        assert entry['billing_status'] == 'released'
+
+
 def test_concurrent_duplicate_image_request_makes_one_submission(project):
     pid, cid, rev = project
     with ThreadPoolExecutor(max_workers=2) as pool:

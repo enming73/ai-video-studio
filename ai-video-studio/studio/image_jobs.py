@@ -24,6 +24,14 @@ class UnknownRemote(Exception):
     """The provider request may have been sent but its outcome is unknown."""
 
 
+class PreRequestFailure(Exception):
+    """A deterministic failure proven to occur before any provider request."""
+
+
+class PostResponseFailure(Exception):
+    """The provider returned a response but its content was rejected."""
+
+
 _UNKNOWN_ERRORS = (httpx.HTTPError, OSError, ValueError, KeyError, IndexError, TypeError)
 
 
@@ -33,7 +41,7 @@ def _api_credentials() -> tuple[str, str]:
     key = os.getenv('STUDIO_IMAGE_API_KEY') or os.getenv('OPENAI_API_KEY')
     base = os.getenv('STUDIO_IMAGE_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
     if not key or not base.startswith('https://'):
-        raise ValueError('Image API key and HTTPS endpoint required')
+        raise PreRequestFailure('Image API key and HTTPS endpoint required')
     return key, base
 
 
@@ -80,7 +88,7 @@ def execute_character(payload: dict) -> dict:
     key, base = _api_credentials()
     raw = _request_unknown(_request_image, key, base, model, prompt)
     if not raw.startswith(guided_images._FORMATS['.png']) or len(raw) > guided_images.MAX_IMAGE_BYTES:
-        raise ValueError('Provider returned an invalid image')
+        raise PostResponseFailure('Provider returned an invalid image')
     image_id = uuid4().hex
     target = guided_images._safe_path(pid, image_id, '.png')
     with target.open('xb') as f:
@@ -90,9 +98,9 @@ def execute_character(payload: dict) -> dict:
                                  '-frames:v', '1', '-f', 'null', '-'],
                                 capture_output=True, timeout=15)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise ValueError('FFmpeg is required to validate image content') from exc
+        raise PostResponseFailure('FFmpeg is required to validate image content') from exc
     if result.returncode:
-        raise ValueError('Provider returned an invalid image')
+        raise PostResponseFailure('Provider returned an invalid image')
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         db.execute('INSERT INTO guided_character_images VALUES (?,?,?,?,?,?,?)',
@@ -113,7 +121,7 @@ def execute_boundary(payload: dict) -> dict:
         path = guided_images.image_path(pid, ref['image_id'])
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != ref['sha256']:
-            raise ValueError('Reference image changed')
+            raise PreRequestFailure('Reference image changed')
         references.append((ref, path, raw))
     files = None
     if references:
@@ -126,7 +134,7 @@ def execute_boundary(payload: dict) -> dict:
     else:
         data = _request_unknown(_request_image, key, base, model, prompt, size='1536x1024')
     if not data.startswith(guided_images._FORMATS['.png']) or len(data) > guided_images.MAX_IMAGE_BYTES:
-        raise ValueError('Invalid provider image')
+        raise PostResponseFailure('Invalid provider image')
     temp = guided_images._safe_path(pid, uuid4().hex + '-raw', '.png')
     with temp.open('xb') as f:
         f.write(data)
@@ -134,6 +142,8 @@ def execute_boundary(payload: dict) -> dict:
     target = guided_images._safe_path(pid, image_id, '.png')
     try:
         guided_images.crop_to_16x9(temp, target)
+    except Exception as exc:
+        raise PostResponseFailure(f'Provider image could not be normalized: {str(exc)[:200]}') from exc
     finally:
         temp.unlink(missing_ok=True)
     with core.connect() as db:

@@ -140,6 +140,37 @@ def test_structure_is_rejected_while_an_image_job_is_unresolved(structure_projec
     guided_structure.apply(pid, target(state, [6, 6, 8]), state['revision'])
 
 
+def test_budget_blocked_image_job_does_not_block_structure(structure_project):
+    from studio import request_jobs
+    pid, state = structure_project
+    job = request_jobs.submit(pid, kind='image', request_id='img-budget-blocked',
+                              payload={'target': 'boundary', 'target_id': state['boundaries'][0]['id'],
+                                       'project_id': pid, 'request_id': 'img-budget-blocked',
+                                       'model': 'gpt-image-2.5-sunburst', 'budget_usd': 1,
+                                       'prompt': 'p', 'references': []},
+                              budget_usd=1, target_key=f"boundary:{state['boundaries'][0]['id']}")
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='budget_exceeded' WHERE id=?",
+                   (job['id'],))
+    guided_structure.apply(pid, target(state, [6, 6, 8]), state['revision'])
+
+
+def test_unknown_remote_image_job_still_blocks_structure(structure_project):
+    from studio import request_jobs
+    pid, state = structure_project
+    job = request_jobs.submit(pid, kind='image', request_id='img-unknown-block',
+                              payload={'target': 'boundary', 'target_id': state['boundaries'][0]['id'],
+                                       'project_id': pid, 'request_id': 'img-unknown-block',
+                                       'model': 'gpt-image-2.5-sunburst', 'budget_usd': 1,
+                                       'prompt': 'p', 'references': []},
+                              budget_usd=1, target_key=f"boundary:{state['boundaries'][0]['id']}")
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?",
+                   (job['id'],))
+    with pytest.raises(ValueError, match='unresolved'):
+        guided_structure.apply(pid, target(state, [6, 6, 8]), state['revision'])
+
+
 def test_missing_id_creates_new_shot_and_malformed_id_is_rejected(structure_project):
     pid, state = structure_project
     with pytest.raises(ValueError, match='Invalid shot id'):

@@ -57,3 +57,27 @@ def test_latest_attempt_returns_none_without_attempts(job_project):
     job = request_jobs.submit(pid, kind='image', request_id='a', target_key='character:c1',
                               payload={'x': 1}, budget_usd=1)
     assert request_jobs.latest_attempt(job) is None
+
+
+def test_blocked_budget_job_is_not_reused(job_project):
+    pid = job_project
+    first = request_jobs.submit(pid, kind='image', request_id='a', target_key='character:c1',
+                                payload={'x': 1}, budget_usd=1)
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='budget_exceeded' WHERE id=?",
+                   (first['id'],))
+    second = request_jobs.submit(pid, kind='image', request_id='b', target_key='character:c1',
+                                 payload={'x': 1}, budget_usd=1)
+    assert second['id'] != first['id']
+
+
+def test_blocked_unknown_remote_job_is_still_reused(job_project):
+    pid = job_project
+    first = request_jobs.submit(pid, kind='image', request_id='a', target_key='character:c1',
+                                payload={'x': 1}, budget_usd=1)
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?",
+                   (first['id'],))
+    second = request_jobs.submit(pid, kind='image', request_id='b', target_key='character:c1',
+                                 payload={'x': 1}, budget_usd=1)
+    assert second['id'] == first['id']
