@@ -1,7 +1,7 @@
 # AI Video Studio — Roadmap
 
 更新：2026-11-16
-路线图及 M0 实施已获用户确认；M0 已验收。M1 实施中：M1-A/B/C、M1-D1、M1-D2、M1-E1（Guided 付费分镜/图像/边界提示词 Job）与 M1-E2（旁白/TTS/参考图 Job）已完成并合并；M1-E3（导演/连续性视觉评审 Job）已在本分支实现、待合并。
+路线图及 M0 实施已获用户确认；M0 已验收。M1 工作包已全部完成并合并：M1-A/B/C、M1-D1、M1-D2、M1-E1（Guided 付费分镜/图像/边界提示词 Job）、M1-E2（旁白/TTS/参考图 Job）与 M1-E3（导演/连续性视觉评审 Job）；M1 退出条件待统一验收。
 
 > **一键初稿 → 按需精修 → 局部重做 → 可靠导出。**
 >
@@ -27,7 +27,7 @@
 | 声音 | 旁白、TTS、音乐、SFX、字幕、ducking | 自动编排、试听一致性、响度控制 |
 | 质量 | FFprobe/FFmpeg 分析、VLM 建议 | 与自动流程衔接的硬性质量门槛 |
 | 费用 | 多处预算参数和视频费用预留 | 全阶段统一账本、对账、完整报告 |
-| 测试 | Studio 491 项、VBench 8 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
+| 测试 | Studio 497 项、VBench 8 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
 
 源码定位：`studio/core.py`、`guided_generation.py`、`timeline.py`、`sound.py`、`webapp.py`（均位于 `ai-video-studio/`）；共享适配器位于 `video-provider-core/src/video_provider_core/`。
 
@@ -73,7 +73,7 @@ M0 现状验收基线
 
 ## M1 — 可恢复任务、Provider 契约与统一费用
 
-**状态：实施中（M1-A/B/C、M1-D1 legacy Job/API、M1-D2 Guided 付费视频 Job、M1-E1 Guided 付费分镜/图像/边界提示词 Job、M1-E2 旁白/TTS/参考图 Job 已完成并合并；M1-E3 导演/连续性视觉评审 Job 已在本分支实现、待合并）。依赖：M0。**
+**状态：工作包已完成并合并（M1-A/B/C、M1-D1 legacy Job/API、M1-D2 Guided 付费视频 Job、M1-E1 Guided 付费分镜/图像/边界提示词 Job、M1-E2 旁白/TTS/参考图 Job、M1-E3 导演/连续性视觉评审 Job）；M1 退出条件待统一验收。依赖：M0。**
 
 工作包：
 
@@ -104,7 +104,7 @@ E1 仍未覆盖：`PAUSED` 的旧状态映射、真实付费恢复与付费 UI �
 
 M1-E2（旁白/TTS/参考图 Job）已完成并合并（PR #16，merge `539c5f2`）：旁白规划 LLM（`llm_narration`）、按行 TTS（每行一个 `tts_segment` Job，共享一个 Run）与参考图生成（`image`）均改为持久化 Job，共用 `request_jobs.submit` 入队，由 Worker 或 `studio web` 内嵌 worker 执行；每次付费均需明确确认、正预算与幂等 request ID；未知结果保留预留并 `BLOCKED`，绝不自动重试；TTS 部分失败时 CLI 报错且保留既有 `narration.wav`；TTS 聚合从 Job 不可变 payload 生成 SRT/duration，变更 payload 的重放会被拒绝。三条 live CLI（`narration-plan`、`narration-tts`、`generate-frame`）均阻塞等待 Job 完成并报告 Job ID/状态，绝不把 blocked/failed 当作成功。E2 验证证据：Studio 472 项、VBench 8 项测试通过，前端生产构建通过；最终整分支评审的 Important 已修复，scoped re-review 无新的 Critical/Important；付费路径全部使用假 provider/LLM/TTS，不调用真实付费 API。
 
-M1-E3（导演/连续性视觉评审 Job）已在本分支实现、待合并：导演逐镜头评审打开一个共享 Run、每个选定镜头一个 `vision_review` Job；连续性逐边界对评审打开一个共享 Run、每个就绪 pair 一个 `vision_review` Job；两者共用单一 `vision_review` Job kind，由 payload 的 `kind` 字段区分 director/continuity，`review_id` 由 request ID 派生。每次付费仍需明确确认、正预算与幂等 request ID；未知结果保留预留并 `BLOCKED`，绝不自动重试；部分失败保留在组装报告中（`partial`）并令 CLI 以非零退出；CLI/API 阻塞等待并报告 `review_id`/`run_id`/逐项状态，独立 Worker 为替代执行器。E3 验证证据：Studio 491 项、VBench 8 项测试通过，前端生产构建通过；付费路径全部使用假 provider/LLM，不调用真实付费 API。
+M1-E3（导演/连续性视觉评审 Job）已完成并合并（PR #19，merge `2ae580b`）：导演逐镜头评审打开一个 request-id 绑定的共享 Run、每个选定镜头一个 `vision_review` Job；连续性逐边界对评审打开一个共享 Run、每个就绪 pair 一个 `vision_review` Job；两者共用单一 `vision_review` Job kind，由 payload 的 `kind` 字段区分 director/continuity，`review_id` 由 request ID 派生。每次付费仍需明确确认、正预算与幂等 request ID；未知结果保留预留并 `BLOCKED`，绝不自动重试；401/403 与 429 分别归类为 `auth`/`rate_limited` 并释放预留；部分失败保留在组装报告中（`partial`）并令 CLI 以非零退出；CLI/API 阻塞等待并报告 `review_id`/`run_id`/逐项状态，独立 Worker 为替代执行器。E3 验证证据：Studio 497 项、VBench 8 项测试通过，前端生产构建通过；最终整分支评审的 Important 已修复，scoped re-review 无新的 Critical/Important；付费路径全部使用假 provider/LLM，不调用真实付费 API。
 
 退出条件：
 
