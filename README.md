@@ -142,8 +142,34 @@ resubmit. Recovery only attaches or queries a verified remote ID and never
 submits a new paid request.
 
 Remaining limits: `PAUSED` still has no legacy status mapping; real paid recovery
-and the paid UI generation path have not been verified end-to-end; narration/TTS
-(E2) and Director/continuity vision reviews (E3) are still pending.
+and the paid UI generation path have not been verified end-to-end. Narration, TTS
+and reference-image live generation are now persistent Jobs (M1-E2); Director and
+continuity vision reviews (E3) are still pending.
+
+### Persistent narration, TTS and reference-image jobs (M1-E2)
+
+Narration planning (`narration-plan --live`), per-line speech synthesis
+(`narration-tts --live`), and reference-image generation (`generate-frame --live`)
+are now persistent Jobs, alongside the Guided jobs above. Each paid request still
+requires the explicit `--live` confirmation, a positive `--budget`, and an
+idempotency request ID (supplied explicitly or derived from the request). New paid
+submissions create Job/Attempt/Event rows and replace the legacy synchronous
+request paths.
+
+- **Narration planning** is one `llm_narration` Job. The CLI waits for it and
+  reports the Job ID and resulting script; a separate worker can execute it
+  instead with `uv run studio worker`.
+- **TTS** opens one shared Run and one `tts_segment` Job per script line. A
+  repeated identical command reuses the same Run and Jobs, so no second paid
+  request is opened. A partial failure raises and leaves any prior
+  `narration.wav` untouched.
+- **Reference-image** live generation is one `image` Job. The CLI waits and
+  reports the Job ID and generated file.
+
+The CLI blocks until the Job reaches a terminal state and never claims success
+for a blocked or failed Job. Unknown outcomes retain their reservation and leave
+the Job `BLOCKED`; check the provider bill before resolving an unknown request,
+and never blindly resubmit.
 
 ## Install
 ```bash
@@ -367,8 +393,10 @@ cd ../vbench && uv run --extra test pytest -q
 On an existing project, generate an editable per-shot narration script, then
 produce voice audio and shot-aligned SRT subtitles. Planning and TTS are dry
 runs unless `--live` is supplied; live requests may incur provider charges.
-Configure the LLM and TTS credentials as described in
-[README-v0.6.1.md](README-v0.6.1.md), and review the script before synthesis.
+Live planning and TTS are persistent Jobs; see **Persistent narration, TTS and
+reference-image jobs (M1-E2)** for their Job/attempt behavior. Configure the LLM
+and TTS credentials as described in [README-v0.6.1.md](README-v0.6.1.md), and
+review the script before synthesis.
 
 ```bash
 cd ai-video-studio

@@ -46,3 +46,28 @@ def test_repeated_frame_generation_does_not_overwrite_prior_image(tmp_path, monk
     second = rg.generate_frame(pid, 1, live=True, budget_usd=1, request_id='v2', force=True)
     assert first['generated_file'] != second['generated_file']
     assert Path(first['generated_file']).read_bytes() == PNG
+
+
+def test_live_reference_cli_reports_job_status(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    from studio import image_jobs
+    pid, _ = setup(tmp_path, monkeypatch)
+    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    monkeypatch.setattr(image_jobs, '_request_edit', lambda *a, **k: PNG)
+    result = CliRunner().invoke(app, ['generate-frame', pid, '1', '--live', '--budget', '1'])
+    assert result.exit_code == 0
+    assert 'job_id' in result.output
+
+
+def test_live_reference_cli_reports_blocked_job(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    from studio import image_jobs
+    pid, _ = setup(tmp_path, monkeypatch)
+    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    monkeypatch.setattr(image_jobs, '_request_edit',
+                        lambda *a, **k: (_ for _ in ()).throw(TimeoutError('timeout')))
+    result = CliRunner().invoke(app, ['generate-frame', pid, '1', '--live', '--budget', '1'])
+    assert result.exit_code != 0
+    assert 'blocked' in result.output.lower() or 'failed' in result.output.lower()

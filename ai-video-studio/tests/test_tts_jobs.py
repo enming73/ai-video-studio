@@ -188,6 +188,23 @@ def test_tts_timeout_blocks_unknown_and_retains_reservation(tts_project, monkeyp
                           (job_id,)).fetchone()[0] == 'reserved'
 
 
+def test_live_tts_cli_reports_partial_failure(tts_project, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    pid = tts_project
+    good_text = SCRIPT['lines'][0]['text']
+    # Line 1 succeeds, line 2 times out -> one SUCCEEDED and one BLOCKED job.
+    # The CLI must report the partial failure and never claim success.
+    def partial(base, key, model, voice, text):
+        if text == good_text:
+            return _fake_mp3_bytes()
+        raise TimeoutError('timeout')
+    monkeypatch.setattr(narration, '_tts_request', partial)
+    result = CliRunner().invoke(app, ['narration-tts', pid, '--live', '--budget', '2'])
+    assert result.exit_code != 0
+    assert 'blocked' in result.output.lower() or 'failed' in result.output.lower()
+
+
 def test_tts_missing_key_fails_final_and_releases(tts_project, monkeypatch):
     pid = tts_project
     monkeypatch.setattr(narration, 'load_dotenv', lambda: None)
