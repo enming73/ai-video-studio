@@ -31,7 +31,53 @@ def _shots(pid):
 def _script_path(pid): return _root(pid) / 'script.json'
 
 
-def plan(pid, language='zh-CN', model=None, live=False, base_url=None, *, budget_usd=None):
+class UnknownRemote(Exception):
+    """The LLM request may have been sent but its outcome is unknown."""
+
+
+_UNKNOWN_ERRORS = (httpx.HTTPError, OSError, json.JSONDecodeError,
+                   KeyError, IndexError, TypeError)
+
+_NARRATION_SYSTEM = (
+    'Write a warm, concise narration for a short film. Return ONLY JSON with key "lines": '
+    'an array of objects {"seq": integer, "text": string}. Each line must be spoken '
+    'comfortably within its shot duration. Do not narrate camera directions. '
+    'Keep characters and story consistent. Do not add facts absent from the visual story.')
+
+
+def generate_script(payload):
+    """Pure LLM prompt construction and validation; no project or file writes."""
+    shots = payload['shots']
+    prompt = {'story': payload['prompt'], 'language': payload['language'],
+              'shots': [{'seq': s['seq'], 'duration': s['duration'],
+                         'visual_prompt': s['prompt']} for s in shots]}
+    try:
+        data = core._llm_json(_NARRATION_SYSTEM, json.dumps(prompt, ensure_ascii=False),
+                              payload['model'], payload['base_url'])
+    except _UNKNOWN_ERRORS as exc:
+        raise UnknownRemote(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise UnknownRemote('LLM returned a non-object response')
+    lines = data.get('lines')
+    if not isinstance(lines, list) or len(lines) != len(shots):
+        raise ValueError('LLM returned wrong line count')
+    by_seq = {}
+    for item in lines:
+        if not isinstance(item, dict) or not isinstance(item.get('seq'), int) or not isinstance(item.get('text'), str):
+            raise ValueError('Invalid LLM narration line')
+        if item['seq'] in by_seq or not item['text'].strip() or len(item['text']) > 600:
+            raise ValueError('Duplicate, empty, or too-long narration line')
+        by_seq[item['seq']] = item['text'].strip()
+    if set(by_seq) != {s['seq'] for s in shots}:
+        raise ValueError('Narration sequence mismatch')
+    return {'project_id': payload['project_id'], 'language': payload['language'],
+            'model': payload['model'],
+            'lines': [{'seq': s['seq'], 'duration': s['duration'],
+                       'text': by_seq[s['seq']]} for s in shots]}
+
+
+def plan(pid, language='zh-CN', model=None, live=False, base_url=None, *,
+         budget_usd=None, request_id=None):
     if live: core.require_paid_budget(budget_usd)
     shots = _shots(pid)
     if not shots: raise ValueError('Project has no storyboard')
@@ -40,29 +86,26 @@ def plan(pid, language='zh-CN', model=None, live=False, base_url=None, *, budget
     if not live:
         return {'dry_run': True, 'shots': len(shots), 'language': language, 'model': model, 'paid_request': bool(model)}
     if not model: raise ValueError('Provide --model to use the LLM')
-    with core.connect() as db:
-        p = dict(core.project(db,pid))
-    prompt = {'story':p['prompt'],'language':language,'shots':[{'seq':s['seq'],'duration':s['duration'],'visual_prompt':s['prompt']} for s in shots]}
-    data = core._llm_json(
-        'Write a warm, concise narration for a short film. Return ONLY JSON with key "lines": '
-        'an array of objects {"seq": integer, "text": string}. Each line must be spoken '
-        'comfortably within its shot duration. Do not narrate camera directions. '
-        'Keep characters and story consistent. Do not add facts absent from the visual story.',
-        json.dumps(prompt,ensure_ascii=False),model,base_url or os.getenv('STUDIO_LLM_BASE_URL','https://api.openai.com/v1'))
-    lines = data.get('lines')
-    if not isinstance(lines,list) or len(lines)!=len(shots): raise ValueError('LLM returned wrong line count')
-    by_seq = {}
-    for item in lines:
-        if not isinstance(item,dict) or not isinstance(item.get('seq'),int) or not isinstance(item.get('text'),str):
-            raise ValueError('Invalid LLM narration line')
-        if item['seq'] in by_seq or not item['text'].strip() or len(item['text'])>600:
-            raise ValueError('Duplicate, empty, or too-long narration line')
-        by_seq[item['seq']]=item['text'].strip()
-    if set(by_seq)!={s['seq'] for s in shots}: raise ValueError('Narration sequence mismatch')
-    result={'project_id':pid,'language':language,'model':model,
-            'lines':[{'seq':s['seq'],'duration':s['duration'],'text':by_seq[s['seq']]} for s in shots]}
-    target.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
-    return {'script':str(target),'lines':len(shots)}
+    if request_id is None:
+        request_id = f'narration-{pid}'
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        raise ValueError('Request id required')
+    from . import narration_jobs, job_runner
+    queued = narration_jobs.enqueue_plan(pid, language=language, model=model,
+                                         base_url=base_url, budget_usd=budget_usd,
+                                         request_id=request_id)
+    job_id = queued['job_id']
+    state = job_runner.run_until([job_id])[0]
+    if state['status'] != 'SUCCEEDED':
+        detail = state.get('error_detail') or state.get('error_class') or ''
+        if state['status'] == 'BLOCKED':
+            reason = f'blocked ({state.get("block_reason")})'
+        else:
+            reason = state['status'].lower()
+        raise RuntimeError(f'Narration plan {reason}: {detail}'.rstrip(': '))
+    output = json.loads(state['output_json'] or '{}')
+    return {'script': output.get('script'), 'lines': output.get('lines'),
+            'job_id': job_id}
 
 
 def show(pid):

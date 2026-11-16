@@ -254,9 +254,10 @@ def export_film_cmd(project_id: str, video: str = None, output: str = None,
 
 @app.command('narration-plan')
 def narration_plan_cmd(project_id: str, language: str = 'zh-CN', model: str = None,
-                       live: bool = False, budget: float = None):
+                       live: bool = False, budget: float = None,
+                       request_id: str = typer.Option(None, help='Idempotency key for the paid request')):
     from . import narration
-    try: console.print_json(json.dumps(narration.plan(project_id,language,model,live,budget_usd=budget),ensure_ascii=False))
+    try: console.print_json(json.dumps(narration.plan(project_id,language,model,live,budget_usd=budget,request_id=request_id),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
 
 @app.command('narration-show')

@@ -60,7 +60,8 @@ def _remember_alias(db, job, request_id):
 
 
 def submit(pid: str, *, kind: str, request_id: str, payload: dict,
-           budget_usd: float, target_key: str | None = None) -> dict:
+           budget_usd: float, target_key: str | None = None,
+           run_key: str | None = None) -> dict:
     if isinstance(budget_usd, bool) or not isinstance(budget_usd, (int, float)) \
             or not math.isfinite(budget_usd) or budget_usd <= 0:
         raise ValueError('Budget must be a positive finite number')
@@ -71,6 +72,9 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
     if not isinstance(payload, dict):
         raise ValueError('Payload must be an object')
     request_key = f'{kind}:{request_id}'
+    if run_key is None:
+        # One Job per request uses its own Run; a batch shares one caller's Run.
+        run_key = request_key
     with core.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         core.project(db, pid)
@@ -96,7 +100,7 @@ def submit(pid: str, *, kind: str, request_id: str, payload: dict,
                 _remember_alias(db, job, request_id)
                 return job
         run_id = job_runner.open_or_reuse_run(
-            pid, request_key=request_key,
+            pid, request_key=run_key,
             budget_microusd=ledger.to_micro(budget_usd), db=db)
         return jobs.create(pid, kind=kind, payload=payload, request_key=request_key,
                            run_id=run_id, target_key=target_key, db=db)
