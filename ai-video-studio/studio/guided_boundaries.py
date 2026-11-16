@@ -1,5 +1,4 @@
 """Shared N+1 boundary frames for guided character projects."""
-import base64
 import hashlib
 import json
 import os
@@ -7,8 +6,6 @@ import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
-
-from dotenv import load_dotenv
 
 from . import core
 
@@ -252,74 +249,12 @@ def preview_prompt(pid: str, boundary_id: str, model: str) -> dict:
             'note': 'LLM price is unknown; the budget is not a provider-enforced cap.'}
 
 
-def _prompt_attempt(pid: str, attempt_id: str) -> dict:
-    with core.connect() as db:
-        row = db.execute('SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? AND id=?',
-                         (pid, attempt_id)).fetchone()
-        if not row:
-            raise ValueError('Unknown prompt attempt')
-        item = dict(row)
-        item['prompt'] = item.get('result_prompt')
-        return item
-
-
 def generate_prompt(pid: str, boundary_id: str, model: str, budget_usd: float, *,
                     confirm_paid: bool, request_id: str, revision: int) -> dict:
-    from . import guided_workflow
-    details = preview_prompt(pid, boundary_id, model)
-    core.require_paid_budget(budget_usd)
-    if confirm_paid is not True or not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
-        raise ValueError('Explicit confirmation and request ID required')
-    load_dotenv()
-    base_url = os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1')
-    if not os.getenv('STUDIO_LLM_API_KEY'):
-        raise ValueError('Set STUDIO_LLM_API_KEY (no paid request made)')
-    if not base_url.startswith('https://') and not os.getenv('STUDIO_ALLOW_HTTP_LLM'):
-        raise ValueError('LLM endpoint must use HTTPS (or set STUDIO_ALLOW_HTTP_LLM=1 for local use)')
-    aid = uuid4().hex
-    with core.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        guided_workflow._revision(guided_workflow._row(db, pid), revision)
-        existing = db.execute('SELECT * FROM guided_boundary_prompt_attempts '
-                              'WHERE project_id=? AND request_id=?', (pid, request_id)).fetchone()
-        if existing:
-            if existing['boundary_id'] != boundary_id:
-                raise ValueError('Request ID belongs to another boundary')
-            item = dict(existing)
-            item['prompt'] = item.get('result_prompt')
-            return item
-        if db.execute("SELECT 1 FROM guided_boundary_prompt_attempts WHERE project_id=? AND boundary_id=? "
-                      "AND status IN ('SUBMITTING','UNKNOWN')", (pid, boundary_id)).fetchone():
-            raise ValueError('Previous prompt request is unresolved')
-        db.execute('INSERT INTO guided_boundary_prompt_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                   (aid, pid, boundary_id, request_id, 'SUBMITTING', details['model'], budget_usd,
-                    details['source_sha256'], None, None, core.now()))
-    try:
-        result = core._llm_json(_LLM_SYSTEM, json.dumps(details['payload'], ensure_ascii=False),
-                                details['model'], base_url)
-        text = result.get('prompt') if isinstance(result, dict) else None
-        if not isinstance(text, str) or not 20 <= len(text.strip()) <= 4000:
-            raise ValueError('Invalid prompt from the LLM')
-        text = text.strip()
-        with core.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            guided_workflow._row(db, pid)
-            if not db.execute('SELECT 1 FROM guided_boundaries WHERE id=? AND project_id=? AND active=1',
-                              (boundary_id, pid)).fetchone():
-                raise ValueError('Boundary changed during prompt generation')
-            updated = db.execute("UPDATE guided_boundary_prompt_attempts SET status='COMPLETED',result_prompt=? "
-                                 "WHERE project_id=? AND id=? AND status='SUBMITTING'",
-                                 (text, pid, aid))
-            if updated.rowcount == 1:
-                db.execute('INSERT INTO guided_boundary_prompts VALUES (?,?,?,?,?,?,?)',
-                           (uuid4().hex, pid, boundary_id, text, details['source_sha256'],
-                            details['model'], core.now()))
-                db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
-    except Exception as exc:
-        with core.connect() as db:
-            db.execute("UPDATE guided_boundary_prompt_attempts SET status='UNKNOWN',error=? "
-                       "WHERE project_id=? AND id=?", (str(exc)[:500], pid, aid))
-    return _prompt_attempt(pid, aid)
+    from . import prompt_jobs
+    return prompt_jobs.enqueue(pid, boundary_id, model, budget_usd,
+                               confirm_paid=confirm_paid, request_id=request_id,
+                               revision=revision)
 
 
 def clear_prompt(pid: str, boundary_id: str, revision: int) -> dict:
@@ -340,22 +275,51 @@ def clear_prompt(pid: str, boundary_id: str, revision: int) -> dict:
 
 
 def list_prompt_attempts(pid: str) -> list[dict]:
-    with core.connect() as db:
-        return [dict(row) for row in db.execute(
-            'SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? ORDER BY rowid DESC',
-            (pid,))]
+    from . import guided_compat
+    return guided_compat.prompt_attempt_records(pid)
+
+
+def _require_idle(job):
+    from datetime import datetime, timezone
+    if (job['status'] == 'RUNNING' and job['lease_owner'] and job['lease_expires']
+            and datetime.fromisoformat(job['lease_expires']).replace(tzinfo=timezone.utc)
+            > datetime.now(timezone.utc)):
+        raise ValueError('An active worker owns this job; query it later')
 
 
 def resolve_prompt_attempt(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:
     if confirm_checked is not True:
         raise ValueError('Confirm that provider charges were checked')
+    from . import attempts as attempt_store, guided_compat, guided_workflow, jobs
     with core.connect() as db:
-        result = db.execute("UPDATE guided_boundary_prompt_attempts SET status='ACKNOWLEDGED' "
-                            "WHERE project_id=? AND id=? AND status IN ('SUBMITTING','UNKNOWN')",
-                            (pid, attempt_id))
-        if result.rowcount != 1:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._row(db, pid)
+        legacy = db.execute('SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? AND id=?',
+                            (pid, attempt_id)).fetchone()
+        if legacy:
+            if legacy['status'] not in ('SUBMITTING', 'UNKNOWN'):
+                raise ValueError('No unresolved prompt attempt')
+            db.execute("UPDATE guided_boundary_prompt_attempts SET status='ACKNOWLEDGED' "
+                       "WHERE project_id=? AND id=?", (pid, attempt_id))
+            item = dict(legacy)
+            item['prompt'] = item.get('result_prompt')
+            item['status'] = 'ACKNOWLEDGED'
+            return item
+        job = guided_compat.find_prompt_job(pid, attempt_id, db=db)
+        if job is None:
             raise ValueError('No unresolved prompt attempt')
-    return _prompt_attempt(pid, attempt_id)
+        _require_idle(job)
+        current = jobs.latest_attempt(job['id'], db=db)
+        if current and current['status'] == 'ABANDONED':
+            return guided_compat.project_prompt_job(job, db=db)
+        if not current or current['status'] not in ('UNKNOWN_REMOTE_STATE', 'SUBMITTING'):
+            raise ValueError('Only an unknown prompt attempt can be resolved')
+        attempt_store.abandon(current['id'], 'User checked; remote may continue and bill', db=db)
+        db.execute("UPDATE jobs SET status='CANCELLED',cancel_requested=1,lease_owner=NULL,"
+                   "lease_expires=NULL,updated=? WHERE id=?", (core.now(), job['id']))
+        jobs.append_event(job['id'], 'guided_abandoned',
+                          {'warning': 'remote may continue and bill'}, attempt_id=current['id'], db=db)
+        return guided_compat.project_prompt_job(jobs.get(job['id'], db=db), db=db)
 
 
 def ready(db, pid: str, boundary_id: str) -> bool:
@@ -430,75 +394,10 @@ def _boundary_snapshot_current(db, pid, details):
 
 def generate(pid: str, boundary_id: str, model: str, budget_usd: float, *, confirm_paid: bool,
              request_id: str, revision: int) -> dict:
-    from . import guided_images, guided_workflow, guided_characters
-    details = preview(pid, boundary_id, model)
-    core.require_paid_budget(budget_usd)
-    if confirm_paid is not True or not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
-        raise ValueError('Explicit confirmation and request ID required')
-    load_dotenv()
-    key = os.getenv('STUDIO_IMAGE_API_KEY') or os.getenv('OPENAI_API_KEY')
-    base = os.getenv('STUDIO_IMAGE_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
-    if not key or not base.startswith('https://'):
-        raise ValueError('Image API key and HTTPS endpoint required')
-    references = []
-    for ref in details['references']:
-        path = guided_images.image_path(pid, ref['image_id'])
-        raw = path.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ref['sha256']:
-            raise ValueError('Reference image changed')
-        references.append((ref, path, raw))
-    aid = uuid4().hex
-    with core.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        existing = db.execute('SELECT * FROM guided_image_attempts WHERE project_id=? AND request_id=?',
-                              (pid, request_id)).fetchone()
-        if existing:
-            if existing['target_id'] != boundary_id or existing['kind'] != 'boundary':
-                raise ValueError('Request ID belongs to another image operation')
-            return {k: existing[k] for k in ('id','target_id','kind','request_id','model','budget','status','image_id','error')}
-        guided_workflow._revision(guided_workflow._row(db, pid), revision)
-        if db.execute("SELECT 1 FROM guided_image_attempts WHERE project_id=? AND target_id=? AND kind='boundary' AND status IN ('SUBMITTING','UNKNOWN')",
-                      (pid, boundary_id)).fetchone():
-            raise ValueError('Previous image submission is unresolved')
-        db.execute('INSERT INTO guided_image_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                   (aid, pid, boundary_id, 'boundary', request_id, model, budget_usd, 'SUBMITTING',
-                    json.dumps(details), None, None))
-    try:
-        if references:
-            types = {'.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.webp':'image/webp'}
-            files = [('image[]', (ref['image_id'] + path.suffix, raw, types[path.suffix.lower()])) for ref, path, raw in references]
-            data = guided_images._image_edit(base+'/images/edits', key,
-                                             {'model':model,'prompt':details['prompt'],'size':'1536x1024','output_format':'png'}, files)
-        else:
-            data = guided_images._image_request(base+'/images/generations', key,
-                                                {'model':model,'prompt':details['prompt'],'size':'1536x1024','output_format':'png'})
-        raw = base64.b64decode(data['data'][0]['b64_json'], validate=True)
-        if not raw.startswith(guided_images._FORMATS['.png']) or len(raw) > guided_images.MAX_IMAGE_BYTES:
-            raise ValueError('Invalid provider image')
-        temp = guided_images._safe_path(pid, uuid4().hex + '-raw', '.png')
-        with temp.open('xb') as f:
-            f.write(raw)
-        image_id = uuid4().hex
-        target = guided_images._safe_path(pid, image_id, '.png')
-        try:
-            guided_images.crop_to_16x9(temp, target)
-        finally:
-            temp.unlink(missing_ok=True)
-        with core.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            guided_workflow._row(db, pid)
-            stale = int(not _boundary_snapshot_current(db, pid, details))
-            version_id = insert_version(db, pid, boundary_id, target, stale=stale, prompt=details['prompt'],
-                                        model=model, references=[(r['id'], r['image_id']) for r in details['references']],
-                                        version_id=image_id)
-            db.execute("UPDATE guided_image_attempts SET status='COMPLETED',image_id=? WHERE project_id=? AND id=?",
-                       (version_id, pid, aid))
-            guided_characters._changed(db, pid)
-    except Exception:
-        with core.connect() as db:
-            db.execute("UPDATE guided_image_attempts SET status='UNKNOWN',error=? WHERE project_id=? AND id=?",
-                       ('Image request failed or outcome unknown; check provider charges.', pid, aid))
-    return guided_images.image_attempt(pid, aid)
+    from . import image_jobs
+    return image_jobs.enqueue_boundary(pid, boundary_id, model, budget_usd,
+                                       confirm_paid=confirm_paid, request_id=request_id,
+                                       revision=revision)
 
 
 def list_frames(pid: str, boundary_id: str) -> list[dict]:

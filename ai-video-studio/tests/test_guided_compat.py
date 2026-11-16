@@ -141,3 +141,67 @@ def test_generic_reconcile_uses_original_guided_shot_id(guided_job):
     assert timeline.assets(pid, 1) == []
     assert len(timeline.assets(pid, 2)) == 1
     assert timeline.assets(pid, 2)[0]['shot_id'] == original_shot_id
+
+
+def _prompt_payload(pid):
+    return {
+        'project_id': pid, 'boundary_id': 'b1', 'model': 'm', 'budget_usd': 1.0,
+        'request_id': 'p1', 'source_sha256': 'sha',
+        'prompt_payload': {'role': 'transition'}, 'revision': 0,
+    }
+
+
+@pytest.fixture
+def prompt_job(tmp_path, monkeypatch):
+    from studio import request_jobs
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('Elephant', 10, 'mock', 5)
+    workflow.create(pid)
+    payload = _prompt_payload(pid)
+    return request_jobs.submit(pid, kind='llm_prompt', request_id='p1', payload=payload,
+                               budget_usd=1, target_key='prompt:b1')
+
+
+def test_prompt_projection_matches_legacy_shape(prompt_job):
+    with core.connect() as db:
+        legacy_keys = {r['name'] for r in db.execute('PRAGMA table_info(guided_boundary_prompt_attempts)')}
+    result = compat.project_prompt_job(prompt_job)
+    assert set(result) == legacy_keys
+    assert result['status'] == 'QUEUED'
+    assert result['boundary_id'] == 'b1'
+    assert result['request_id'] == 'p1'
+    assert result['budget_usd'] == 1.0
+    assert result['source_sha256'] == 'sha'
+    assert result['result_prompt'] is None
+    assert result['error'] is None
+
+
+@pytest.mark.parametrize('job_status,attempt_status,expected', [
+    ('PENDING', None, 'QUEUED'), ('RUNNING', None, 'QUEUED'),
+    ('RUNNING', 'PLANNED', 'QUEUED'), ('RUNNING', 'RESERVED', 'QUEUED'),
+    ('RUNNING', 'SUBMITTING', 'SUBMITTING'),
+    ('RUNNING', 'COMPLETED', 'COMPLETED'), ('SUCCEEDED', 'COMPLETED', 'COMPLETED'),
+    ('BLOCKED', 'UNKNOWN_REMOTE_STATE', 'UNKNOWN'),
+    ('FAILED', 'FAILED_FINAL', 'FAILED'), ('RUNNING', 'FAILED_RETRYABLE', 'FAILED'),
+    ('CANCELLED', 'SUBMITTED', 'ACKNOWLEDGED'), ('RUNNING', 'ABANDONED', 'ACKNOWLEDGED'),
+])
+def test_prompt_status_mapping(prompt_job, job_status, attempt_status, expected):
+    if attempt_status:
+        attempt = attempts.create(prompt_job['id'], provider='llm', model='m',
+                                  input_data=json.loads(prompt_job['payload_json']))
+        with core.connect() as db:
+            db.execute('UPDATE job_attempts SET status=? WHERE id=?', (attempt_status, attempt['id']))
+    job = {**prompt_job, 'status': job_status,
+           'block_reason': 'unknown_remote' if job_status == 'BLOCKED' else None}
+    assert compat.project_prompt_job(job)['status'] == expected
+
+
+def test_prompt_attempt_records_merges_legacy_and_jobs(prompt_job):
+    pid = prompt_job['project_id']
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_boundary_prompt_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   ('legacy-1', pid, 'b1', 'legacy-req', 'UNKNOWN', 'm', 1.0, 'sha', None, 'err', core.now()))
+    rows = compat.prompt_attempt_records(pid)
+    ids = [row['id'] for row in rows]
+    assert ids == [prompt_job['id'], 'legacy-1']
+    assert len(ids) == len(set(ids))

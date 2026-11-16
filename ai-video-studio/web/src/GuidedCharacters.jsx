@@ -37,6 +37,18 @@ export default function GuidedCharacters({pid,state,call,run,refresh,onRoles}) {
   useEffect(()=>{if(!state.character_stage_enabled){setData(null);onRoles(null);return;}
     Promise.all([call(root+'/characters'),call(root+'/image-attempts')]).then(([value,jobs])=>{setData(value);setAttempts(jobs);onRoles(value);}).catch(()=>{});
   },[pid,state.revision,state.character_stage_enabled]);
+  const imagePollKey = attempts.filter(a => ['QUEUED','SUBMITTING'].includes(a.status)).map(a => `${a.id}:${a.status}`).join('|');
+  useEffect(()=>{
+    if(!imagePollKey)return;
+    const timer = setInterval(async()=>{
+      try{
+        const rows = await call(root+'/image-attempts');
+        setAttempts(rows);
+        if(!rows.some(a => ['QUEUED','SUBMITTING'].includes(a.status))){await refresh(true);}
+      }catch(e){}
+    },3000);
+    return ()=>clearInterval(timer);
+  },[pid,imagePollKey]);
   if(!state.character_stage_enabled)return <section className="guided-card"><h3>角色定妆（可选启用）</h3>
     <p>为此已有项目启用角色与首帧阶段；旧素材保留，启用后需要重新确认角色及镜头关联。</p>
     <button onClick={()=>run(async()=>{if(!window.confirm('为当前项目启用角色定妆和首帧流程？'))return;
@@ -50,7 +62,7 @@ export default function GuidedCharacters({pid,state,call,run,refresh,onRoles}) {
     <div className="guided-card"><h4>添加角色</h4><label>角色名<input value={name} onChange={e=>setName(e.target.value)}/></label>
       <label>角色设定<textarea rows="2" value={description} onChange={e=>setDescription(e.target.value)}/></label>
       <button disabled={!name.trim()||!description.trim()} onClick={()=>run(async()=>{await call(root+'/characters','POST',{name,description,revision:state.revision});setName('');setDescription('');await refresh(true);})}>添加角色</button></div>
-    {attempts.filter(a=>['SUBMITTING','UNKNOWN'].includes(a.status)).map(a=><div className="guided-warning" key={a.id}>
+    {attempts.filter(a=>a.status === 'UNKNOWN').map(a=><div className="guided-warning" key={a.id}>
       图片请求 {a.id.slice(0,8)} 结果不明，可能已计费；请先核查供应商账单。
       <button onClick={()=>run(async()=>{if(!window.confirm('确认已核查供应商账单，并允许重新授权？'))return;
         await call(root+`/image-attempts/${a.id}/resolve`,'POST',{confirm_checked:true});await refresh(true);})}>已核查，解除阻止</button></div>)}

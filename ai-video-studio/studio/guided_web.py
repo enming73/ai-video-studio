@@ -1,5 +1,4 @@
 """FastAPI adapter for the opt-in guided workflow."""
-import json
 import os
 from typing import Literal
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -268,8 +267,7 @@ def structure(pid: str, body: Structure):
 @router.get('/image-attempts')
 def image_attempts(pid: str):
     call(guided_characters.get, pid)
-    with core.connect() as db:
-        return [dict(r) for r in db.execute('SELECT id,target_id,kind,request_id,model,budget,status,image_id,error FROM guided_image_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    return call(guided_compat.image_attempt_records, pid)
 
 
 @router.post('/image-attempts/{attempt_id}/resolve')
@@ -316,7 +314,7 @@ def boundary_prompt_clear(pid: str, boundary_id: str, body: Revision):
 @router.get('/prompt-attempts')
 def prompt_attempts(pid: str):
     call(guided_workflow.get, pid)
-    return call(guided_boundaries.list_prompt_attempts, pid)
+    return call(guided_compat.prompt_attempt_records, pid)
 
 
 @router.post('/prompt-attempts/{attempt_id}/resolve')
@@ -340,53 +338,22 @@ def plan_preview(pid: str, body: Plan):
 def plan(pid: str, body: Plan):
     if not body.confirm_paid or not body.budget_usd > 0 or not body.request_id:
         raise HTTPException(400, 'Confirmation, positive budget and request ID required')
-    with core.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        row = guided_workflow._row(db, pid)
-        existing = db.execute('SELECT * FROM guided_planning_attempts WHERE project_id=? AND request_id=?',
-                              (pid, body.request_id)).fetchone()
-        if existing:
-            if existing['status'] == 'COMPLETED':
-                return guided_workflow.get(pid)
-            raise HTTPException(400, 'Planning request is unresolved; do not resubmit')
-        if db.execute("SELECT 1 FROM guided_planning_attempts WHERE project_id=? AND status IN ('SUBMITTING','UNKNOWN')", (pid,)).fetchone():
-            raise HTTPException(400, 'Earlier planning request is unresolved')
-        if row['revision'] != body.revision or row['storyboard_confirmed']:
-            raise HTTPException(400, 'Stale revision or storyboard already confirmed')
-        db.execute('INSERT INTO guided_planning_attempts VALUES (?,?,?,?,?,?,?)',
-                   (pid, body.request_id, 'SUBMITTING', body.model, body.budget_usd, None, None))
-    try:
-        draft = guided_storyboard.request_plan(pid, body.model, body.budget_usd,
-                                               confirm_paid=True, shot_length=body.shot_length)
-        with core.connect() as db:
-            db.execute('UPDATE guided_planning_attempts SET result_json=? WHERE project_id=? AND request_id=?',
-                       (json.dumps(draft, ensure_ascii=False), pid, body.request_id))
-        state = guided_workflow.save_draft(pid, draft, body.revision)
-        with core.connect() as db:
-            db.execute("UPDATE guided_planning_attempts SET status='COMPLETED' WHERE project_id=? AND request_id=?", (pid, body.request_id))
-        return state
-    except Exception as exc:
-        with core.connect() as db:
-            db.execute("UPDATE guided_planning_attempts SET status='UNKNOWN',error=? WHERE project_id=? AND request_id=?",
-                       (str(exc)[:500], pid, body.request_id))
-        raise HTTPException(400, 'Planning failed or outcome is uncertain; check charges before resolving: '+str(exc)) from exc
+    return call(guided_storyboard.request_plan, pid, body.model, body.budget_usd,
+                confirm_paid=True, shot_length=body.shot_length,
+                request_id=body.request_id, revision=body.revision)
 
 
 @router.get('/plan/attempts')
 def plan_attempts(pid: str):
     call(guided_workflow.get, pid)
-    with core.connect() as db:
-        return [dict(r) for r in db.execute('SELECT * FROM guided_planning_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    return call(guided_compat.plan_attempt_records, pid)
 
 
 @router.post('/plan/attempts/{request_id}/resolve')
-def resolve_plan(pid: str, request_id: str):
+def resolve_plan(pid: str, request_id: str, body: AbandonAttempt):
     call(guided_workflow.get, pid)
-    with core.connect() as db:
-        result = db.execute("UPDATE guided_planning_attempts SET status='ACKNOWLEDGED' WHERE project_id=? AND request_id=? AND status IN ('SUBMITTING','UNKNOWN')", (pid, request_id))
-        if result.rowcount != 1:
-            raise HTTPException(400, 'No unresolved planning attempt')
-    return {'status': 'ACKNOWLEDGED'}
+    return call(guided_storyboard.resolve_plan, pid, request_id,
+                confirm_checked=body.confirm_checked)
 
 
 @router.put('/draft')

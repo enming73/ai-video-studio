@@ -1,4 +1,3 @@
-import base64
 from pathlib import Path
 
 import pytest
@@ -15,16 +14,23 @@ def test_preview_does_not_require_earlier_shots(boundary_project):
 
 
 def test_generated_frame_is_cropped_to_16_9(boundary_project, monkeypatch):
+    from studio import guided_compat, image_jobs, worker
+    from studio.handlers import register_all
+    register_all()
     pid, state = boundary_project
+    with core.connect() as db:
+        db.execute('UPDATE projects SET budget=? WHERE id=?', (2, pid))
     raw = make_png(Path(core.HOME) / 'raw.png')
     monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    encoded = {'data': [{'b64_json': base64.b64encode(raw).decode()}]}
-    monkeypatch.setattr(images, '_image_request', lambda *a, **k: encoded)
-    monkeypatch.setattr(images, '_image_edit', lambda *a, **k: encoded)
-    attempt = boundaries.generate(pid, state['boundaries'][0]['id'], 'gpt-image-2.5-sunburst', 1,
-                                  confirm_paid=True, request_id='frame-1', revision=state['revision'])
-    assert attempt['status'] == 'COMPLETED'
-    assert images.image_dimensions(images.image_path(pid, attempt['image_id'])) == (1536, 864)
+    monkeypatch.setattr(image_jobs, '_request_image', lambda *a, **k: raw)
+    monkeypatch.setattr(image_jobs, '_request_edit', lambda *a, **k: raw)
+    queued = boundaries.generate(pid, state['boundaries'][0]['id'], 'gpt-image-2.5-sunburst', 1,
+                                 confirm_paid=True, request_id='frame-1', revision=state['revision'])
+    assert queued['status'] == 'QUEUED'
+    assert worker.run_once() == queued['id']
+    result = guided_compat.find_image(pid, queued['id'])
+    assert result['status'] == 'COMPLETED'
+    assert images.image_dimensions(images.image_path(pid, result['image_id'])) == (1536, 864)
 
 
 def test_confirm_and_unconfirm_cascade_to_both_neighbours(boundary_project):

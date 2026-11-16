@@ -11,6 +11,7 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
   const [promptBudget, setPromptBudget] = useState('0.1');
   const [promptAttempts, setPromptAttempts] = useState([]);
   const [promptError, setPromptError] = useState('');
+  const [imageAttempts, setImageAttempts] = useState([]);
   useEffect(() => {
     setPreview(null);
     setDims({});
@@ -21,7 +22,36 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
     call(root + '/prompt-attempts')
       .then(rows => setPromptAttempts(rows.filter(a => a.boundary_id === boundary.id)))
       .catch(() => setPromptAttempts([]));
+    call(root + '/image-attempts')
+      .then(rows => setImageAttempts(rows.filter(a => a.kind === 'boundary' && a.target_id === boundary.id)))
+      .catch(() => setImageAttempts([]));
   }, [pid, boundary?.id, state.revision]);
+  const imagePollKey = imageAttempts.filter(a => ['QUEUED', 'SUBMITTING'].includes(a.status)).map(a => `${a.id}:${a.status}`).join('|');
+  useEffect(() => {
+    if (!imagePollKey || !boundary) return;
+    const timer = setInterval(async () => {
+      try {
+        const rows = await call(root + '/image-attempts');
+        const mine = rows.filter(a => a.kind === 'boundary' && a.target_id === boundary.id);
+        setImageAttempts(mine);
+        if (!mine.some(a => ['QUEUED', 'SUBMITTING'].includes(a.status))) await refresh(true);
+      } catch (e) {}
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pid, boundary?.id, imagePollKey]);
+  const promptPollKey = promptAttempts.filter(a => ['QUEUED', 'SUBMITTING'].includes(a.status)).map(a => `${a.id}:${a.status}`).join('|');
+  useEffect(() => {
+    if (!promptPollKey || !boundary) return;
+    const timer = setInterval(async () => {
+      try {
+        const rows = await call(root + '/prompt-attempts');
+        const mine = rows.filter(a => a.boundary_id === boundary.id);
+        setPromptAttempts(mine);
+        if (!mine.some(a => ['QUEUED', 'SUBMITTING'].includes(a.status))) await refresh(true);
+      } catch (e) {}
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pid, boundary?.id, promptPollKey]);
 
   if (!boundary) return null;
   const shotsCount = state.shots.length;
@@ -64,7 +94,10 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
               model: promptModel, budget_usd: Number(promptBudget), confirm_paid: true,
               request_id: crypto.randomUUID(), revision: state.revision});
             await refresh(true);
-            if (r.status !== 'COMPLETED') throw Error('提示词请求结果不明，请先核查供应商账单。');
+            const rows = await call(root + '/prompt-attempts');
+            setPromptAttempts(rows.filter(a => a.boundary_id === boundary.id));
+            if (r.status === 'UNKNOWN') throw Error('提示词请求结果不明，请先核查供应商账单。');
+            if (r.status === 'FAILED') throw Error(r.error || '提示词请求失败。');
           } catch (e) {
             setPromptError(e.message);
             throw e;
@@ -76,7 +109,7 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
         await call(root + `/boundaries/${boundary.id}/prompt`, 'DELETE', {revision: state.revision});
         await refresh(true);
       })}>恢复自动提示词</button></div>}
-      {promptAttempts.filter(a => ['SUBMITTING', 'UNKNOWN'].includes(a.status)).map(a =>
+      {promptAttempts.filter(a => a.status === 'UNKNOWN').map(a =>
         <div className="guided-warning" key={a.id}>上次提示词请求结果不明，可能已计费：{a.error || a.status}。
           <button onClick={() => run(async () => {
             if (!window.confirm('确认已核查此请求，允许以后重新生成？')) return;
@@ -108,7 +141,14 @@ export default function GuidedBoundaryFrames({pid, boundary, state, call, run, r
         if (!window.confirm(`确认付费生成边界 B${boundary.position}？预算 $${budget}，实际账单可能不同。`)) return;
         const r = await call(root + `/boundaries/${boundary.id}/frames`, 'POST', {model: 'gpt-image-2.5-sunburst', budget_usd: Number(budget), confirm_paid: true, request_id: crypto.randomUUID(), revision: state.revision});
         setPreview(null); await refresh(true);
-        if (r.status !== 'COMPLETED') throw Error('边界帧请求结果不明，请先核查供应商账单。');
+        if (r.status === 'UNKNOWN') throw Error('边界帧请求结果不明，请先核查供应商账单。');
       })}>授权生成边界帧</button></>}
+      {imageAttempts.filter(a => a.status === 'UNKNOWN').map(a =>
+        <div className="guided-warning" key={a.id}>边界帧请求结果不明，可能已计费：{a.error || a.status}。
+          <button onClick={() => run(async () => {
+            if (!window.confirm('确认已核查此请求，允许以后重新生成？')) return;
+            await call(root + `/image-attempts/${a.id}/resolve`, 'POST', {confirm_checked: true});
+            await refresh(true);
+          })}>已核查，解除阻止</button></div>)}
   </section>;
 }

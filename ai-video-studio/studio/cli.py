@@ -74,8 +74,18 @@ def smart_plan_cmd(project_id: str, model: str = typer.Option(...), shot_length:
         if not live:
             console.print({'mode': 'DRY_RUN', **guided_storyboard.preview(project_id, model, shot_length)})
             return
-        draft = guided_storyboard.request_plan(project_id, model, budget, confirm_paid=True,
-                                               shot_length=shot_length, base_url=base_url)
+        core.require_paid_budget(budget)
+        details = guided_storyboard.preview(project_id, model, shot_length)
+        with core.connect() as db:
+            project = dict(core.project(db, project_id))
+        payload = {
+            'brief': project['prompt'], 'model': model,
+            'duration': details['duration'],
+            'allowed_durations': details['allowed_durations'],
+            'fixed_durations': details['fixed_durations'],
+            'character_stage': False, 'base_url': base_url,
+        }
+        draft = guided_storyboard.generate_draft(payload)
         count = guided_storyboard.save_plan(project_id, model, draft)
         console.print(f"Planned {count} LLM-directed shots")
     except (ValueError, RuntimeError, Exception) as e:
