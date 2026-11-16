@@ -5,6 +5,7 @@ These tests never call a real TTS API. They either monkeypatch the extracted
 ``narration._tts_request`` to return a locally synthesized MP3, or drive the
 worker directly with a fault injected so the request never leaves the process.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -108,6 +109,40 @@ def test_enqueue_batch_allocates_budget_exactly(tts_project):
             for job_id in queued['job_ids']]
     assert sum(amounts) == total
     assert amounts[-1] == total - amounts[0] * (len(lines) - 1)
+
+
+def test_tts_request_id_cannot_escape_segment_directory(tts_project):
+    pid = tts_project
+    lines = narration.show(pid)['lines']
+    request_id = '../../escape'
+    queued = tts_jobs.enqueue_batch(pid, lines, voice='alloy', model='m',
+                                    budget_usd=2, request_id=request_id, force=False)
+    root = core.HOME / pid / 'narration'
+    expected = hashlib.sha256(request_id.encode('utf-8')).hexdigest()[:32]
+    with core.connect() as db:
+        for job_id in queued['job_ids']:
+            payload = json.loads(db.execute(
+                'SELECT payload_json FROM jobs WHERE id=?', (job_id,)).fetchone()[0])
+            seg_dir = Path(payload['segment_dir'])
+            assert seg_dir.parent == root / 'segments'
+            assert seg_dir.name == expected
+            assert '..' not in seg_dir.parts
+    assert not (core.HOME / pid / 'escape').exists()
+
+
+def test_tts_long_request_id_still_enqueues(tts_project):
+    pid = tts_project
+    lines = narration.show(pid)['lines']
+    request_id = 'r' * 128
+    queued = tts_jobs.enqueue_batch(pid, lines, voice='alloy', model='m',
+                                    budget_usd=2, request_id=request_id, force=False)
+    assert len(queued['job_ids']) == len(lines)
+    with core.connect() as db:
+        for job_id in queued['job_ids']:
+            key = db.execute('SELECT request_key FROM jobs WHERE id=?',
+                             (job_id,)).fetchone()[0]
+            assert key.startswith('tts_segment:')
+            assert len(key) <= 128
 
 
 def test_synthesize_is_idempotent(tts_project, fake_tts):

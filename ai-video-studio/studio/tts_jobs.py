@@ -37,6 +37,10 @@ def enqueue_batch(pid, lines, *, voice, model, budget_usd, request_id, force):
         request_id = _batch_key(lines, voice, model, force)
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
         raise ValueError('Request id required')
+    # A safe, deterministic directory name: the user request id never becomes a
+    # path component, so a hostile or over-long id cannot escape the narration
+    # directory or overflow the per-segment request key.
+    path_key = hashlib.sha256(request_id.encode('utf-8')).hexdigest()[:32]
     total_micro = ledger.to_micro(budget_usd)
     n = len(lines)
     if total_micro < n:
@@ -45,7 +49,7 @@ def enqueue_batch(pid, lines, *, voice, model, budget_usd, request_id, force):
     allocations = [each] * (n - 1) + [total_micro - each * (n - 1)]
     assert sum(allocations) == total_micro
     base_url = os.getenv('STUDIO_TTS_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
-    segment_dir = narration._root(pid) / 'segments' / request_id
+    segment_dir = narration._root(pid) / 'segments' / path_key
     run_key = f'tts:{request_id}'
     created = []
     for line, amount in zip(lines, allocations):
@@ -61,7 +65,7 @@ def enqueue_batch(pid, lines, *, voice, model, budget_usd, request_id, force):
             'segment_dir': str(segment_dir),
         }
         job = request_jobs.submit(
-            pid, kind='tts_segment', request_id=f'{request_id}:{line["seq"]}',
+            pid, kind='tts_segment', request_id=f'{path_key}:{line["seq"]}',
             payload=payload, budget_usd=budget_usd,
             target_key=f'tts:{line["seq"]}', run_key=run_key)
         created.append(job)
