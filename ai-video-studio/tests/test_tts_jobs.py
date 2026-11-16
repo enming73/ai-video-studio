@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from studio import core, jobs, ledger, narration, worker
+from studio import core, job_runner, jobs, ledger, narration, worker
 from studio import tts_jobs
 
 SCRIPT = {
@@ -203,6 +203,47 @@ def test_live_tts_cli_reports_partial_failure(tts_project, monkeypatch):
     result = CliRunner().invoke(app, ['narration-tts', pid, '--live', '--budget', '2'])
     assert result.exit_code != 0
     assert 'blocked' in result.output.lower() or 'failed' in result.output.lower()
+
+
+def test_tts_replay_after_text_edit_uses_job_payload_srt(tts_project, fake_tts):
+    pid = tts_project
+    lines = narration.show(pid)['lines']
+    queued = tts_jobs.enqueue_batch(pid, lines, voice='alloy', model='m',
+                                    budget_usd=2, request_id='batch-edit',
+                                    force=False)
+    states = job_runner.run_until(queued['job_ids'])
+    root = core.HOME / pid / 'narration'
+    tts_jobs.aggregate(pid, states, force=True)
+
+    # Edit a line's text, keeping its duration, then replay the same batch.
+    script = json.loads(narration._script_path(pid).read_text(encoding='utf-8'))
+    script['lines'][0]['text'] = 'EDITED TEXT KEEPING DURATION。'
+    narration._script_path(pid).write_text(
+        json.dumps(script, ensure_ascii=False), encoding='utf-8')
+
+    # aggregate derives lines from the Job payloads, so the SRT and manifest
+    # describe the audio that was actually synthesized, not the edited script.
+    manifest = tts_jobs.aggregate(pid, states, force=True)
+    srt = (root / 'narration.srt').read_text(encoding='utf-8')
+    assert SCRIPT['lines'][0]['text'] in srt
+    assert 'EDITED TEXT' not in srt
+    assert manifest['characters'] == sum(len(x['text']) for x in SCRIPT['lines'])
+    assert manifest['duration'] == sum(x['duration'] for x in SCRIPT['lines'])
+
+
+def test_tts_replay_after_text_edit_rejects_changed_payload(tts_project):
+    pid = tts_project
+    lines = narration.show(pid)['lines']
+    tts_jobs.enqueue_batch(pid, lines, voice='alloy', model='m',
+                           budget_usd=2, request_id='batch-reject', force=False)
+    script = json.loads(narration._script_path(pid).read_text(encoding='utf-8'))
+    script['lines'][0]['text'] = 'EDITED TEXT。'
+    narration._script_path(pid).write_text(
+        json.dumps(script, ensure_ascii=False), encoding='utf-8')
+    edited = narration.show(pid)['lines']
+    with pytest.raises(ValueError, match='different content'):
+        tts_jobs.enqueue_batch(pid, edited, voice='alloy', model='m',
+                               budget_usd=2, request_id='batch-reject', force=False)
 
 
 def test_tts_missing_key_fails_final_and_releases(tts_project, monkeypatch):

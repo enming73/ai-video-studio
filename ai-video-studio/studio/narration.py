@@ -218,7 +218,7 @@ def synthesize(pid, voice='alloy', model='gpt-4o-mini-tts', live=False, max_char
             + (f":{s['block_reason']}" if s.get('block_reason') else '')
             for s in failed)
         raise RuntimeError(f'Narration TTS partial failure ({detail})')
-    manifest = tts_jobs.aggregate(pid, states, lines=lines, force=force)
+    manifest = tts_jobs.aggregate(pid, states, force=force)
     manifest['run_id'] = queued['run_id']
     manifest['job_ids'] = queued['job_ids']
     return manifest

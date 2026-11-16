@@ -73,16 +73,25 @@ def enqueue_batch(pid, lines, *, voice, model, budget_usd, request_id, force):
             'request_id': request_id}
 
 
-def aggregate(pid, jobs, *, lines, force) -> dict:
-    """Concat every SUCCEEDED segment in seq order and write the final narration."""
+def aggregate(pid, jobs, *, force) -> dict:
+    """Concat every SUCCEEDED segment in seq order and write the final narration.
+
+    The subtitles, total duration and character count are derived from each
+    Job's immutable ``payload_json`` (not the caller's current script lines), so
+    the WAVs, SRT and manifest always describe the same synthesized content —
+    including on an explicit replay after a script edit.
+    """
     from . import sound
     if not jobs:
         raise ValueError('No TTS segment jobs to aggregate')
+    ordered = sorted(jobs, key=lambda j: json.loads(j['payload_json'])['seq'])
+    payloads = [json.loads(j['payload_json']) for j in ordered]
+    lines = [{'seq': p['seq'], 'text': p['text'], 'duration': p['duration']}
+             for p in payloads]
+    voice = payloads[0]['voice']; model = payloads[0]['model']
     root = narration._root(pid)
-    payload = json.loads(jobs[0]['payload_json'])
-    voice = payload['voice']; model = payload['model']
     segments = []
-    for job in sorted(jobs, key=lambda j: json.loads(j['payload_json'])['seq']):
+    for job in ordered:
         if job['status'] != 'SUCCEEDED':
             raise RuntimeError(f'tts segment job {job["id"]} is {job["status"]}')
         output = json.loads(job['output_json'] or '{}')
