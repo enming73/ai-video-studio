@@ -21,6 +21,8 @@ def execute(job, attempts, control):
             result = image_jobs.execute_character(payload)
         elif payload['target'] == 'boundary':
             result = image_jobs.execute_boundary(payload)
+        elif payload['target'] == 'reference':
+            result = image_jobs.execute_reference(payload)
         else:
             raise image_jobs.PreRequestFailure('Unknown image target')
     except image_jobs.UnknownRemote as exc:
@@ -38,5 +40,5 @@ def execute(job, attempts, control):
         attempts.mark_failed(attempt['id'], 'FAILED_FINAL', str(exc),
                              error_class='content_rejected')
         raise
-    attempts.mark_completed(attempt['id'], {'image_id': result['image_id']})
-    return {'image_id': result['image_id']}
+    attempts.mark_completed(attempt['id'], result)
+    return result

@@ -150,9 +150,10 @@ def frame_plan_cmd(project_id: str, seq: int):
 
 @app.command("generate-frame")
 def generate_frame_cmd(project_id: str, seq: int, live: bool = False,
-                       model: str = "gpt-image-2.5-sunburst", force: bool = False, budget: float = None):
+                       model: str = "gpt-image-2.5-sunburst", force: bool = False, budget: float = None,
+                       request_id: str = typer.Option(None, help="Idempotency key for the paid request")):
     from . import reference_generation as rg
-    try: console.print_json(json.dumps(rg.generate_frame(project_id,seq,live=live,model=model,force=force,budget_usd=budget),ensure_ascii=False))
+    try: console.print_json(json.dumps(rg.generate_frame(project_id,seq,live=live,model=model,force=force,budget_usd=budget,request_id=request_id),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f"[red]{e}[/red]");raise typer.Exit(1)
 
 @app.command("generate-i2v")

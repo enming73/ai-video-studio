@@ -1,8 +1,6 @@
 """v0.4.1 opt-in reference image creation and isolated H3 I2V experiments."""
 from __future__ import annotations
-import base64, hashlib, json, mimetypes, os, time
-from uuid import uuid4
-from pathlib import Path
+import base64, hashlib, json, os, time
 import httpx
 from . import core, references
 
@@ -49,33 +47,30 @@ def frame_plan(pid, seq, model=DEFAULT_IMAGE_MODEL):
     digest = hashlib.sha256(json.dumps({'prompt':prompt,'model':model,'references':[hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]},sort_keys=True).encode()).hexdigest()
     return {'project_id':pid,'seq':seq,'model':model,'characters':names,'files':[str(p) for p in paths], 'prompt':prompt,'cache_key':digest,'estimated_cost_usd':None,'existing_first_frame':manifest['shots'].get(str(seq))}
 
-def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=False, client=None, budget_usd=None):
+def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=False, client=None, budget_usd=None, request_id=None):
     if live: core.require_paid_budget(budget_usd)
     plan = frame_plan(pid,seq,model)
     if not live: return {'dry_run':True, **plan}
-    if plan['existing_first_frame'] and not force:
-        raise ValueError('Shot already has a first frame; use --force to replace it (existing asset is retained)')
-    key = os.getenv('STUDIO_IMAGE_API_KEY') or os.getenv('OPENAI_API_KEY')
-    if not key: raise ValueError('Set STUDIO_IMAGE_API_KEY or OPENAI_API_KEY')
-    url = os.getenv('STUDIO_IMAGE_BASE_URL','https://api.openai.com/v1').rstrip('/')
-    if not url.startswith('https://'): raise ValueError('Image API must use HTTPS')
-    own = client is None
-    if own: client = httpx.Client(timeout=180)
-    try:
-        files = [('image[]',(Path(p).name,Path(p).read_bytes(),mimetypes.guess_type(p)[0] or 'image/png')) for p in plan['files']]
-        data = _http_json(client,'POST',url+'/images/edits',headers={'Authorization':'Bearer '+key},
-                          data={'model':model,'prompt':plan['prompt'],'size':'1536x1024','output_format':'png'},files=files)
-        b64 = data['data'][0]['b64_json']
-        raw = base64.b64decode(b64,validate=True)
-        if not raw.startswith(b'\x89PNG\r\n\x1a\n'): raise RuntimeError('Image API did not return PNG bytes')
-        target = references._asset_root(pid)/'generated'/f'shot-{seq:03d}-{plan["cache_key"][:16]}-{uuid4().hex}.png'
-        target.parent.mkdir(parents=True,exist_ok=True)
-        with target.open('xb') as image:
-            image.write(raw)
-        saved = references.import_shot(pid,seq,str(target))
-        return {'dry_run':False,'image':saved,'generated_file':str(target),'model':model,'characters':plan['characters']}
-    finally:
-        if own: client.close()
+    if request_id is None:
+        # Stable id from project, shot and prompt/model/reference digest so a
+        # repeated identical live command is idempotent. --force alone does not
+        # mint a new id: a new explicit --request-id is required for a new
+        # version (the existing asset is retained either way).
+        request_id = f'reference:{pid}:{seq}:{plan["cache_key"][:16]}'
+    from . import image_jobs, job_runner
+    queued = image_jobs.enqueue_reference(pid, seq, model, budget_usd,
+                                          confirm_paid=True,
+                                          request_id=request_id, force=force)
+    job_id = queued['job_id']
+    state = job_runner.run_until([job_id])[0]
+    if state['status'] != 'SUCCEEDED':
+        detail = state.get('error_detail') or state.get('error_class') or ''
+        reason = ('blocked (' + str(state.get('block_reason')) + ')'
+                  if state['status'] == 'BLOCKED' else state['status'].lower())
+        raise RuntimeError(f'Reference frame job {job_id} {reason}: {detail}'.rstrip(': '))
+    output = json.loads(state['output_json'] or '{}')
+    return {'dry_run':False,'image':output['image'],'generated_file':output['generated_file'],
+            'model':model,'characters':output['characters'],'job_id':job_id}
 
 def i2v_plan(pid, seq):
     shot = _shot(pid,seq)

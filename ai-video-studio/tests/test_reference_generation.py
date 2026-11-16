@@ -39,9 +39,10 @@ def test_i2v_paid_requires_ceiling(tmp_path,monkeypatch):
 def test_repeated_frame_generation_does_not_overwrite_prior_image(tmp_path, monkeypatch):
     pid, _ = setup(tmp_path, monkeypatch)
     monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
+    from studio import image_jobs
     images = iter([PNG, PNG + b'new-version'])
-    monkeypatch.setattr(rg, '_http_json', lambda *args, **kwargs: {'data': [{'b64_json': base64.b64encode(next(images)).decode()}]})
-    first = rg.generate_frame(pid, 1, live=True, budget_usd=1, client=object())
-    second = rg.generate_frame(pid, 1, live=True, budget_usd=1, force=True, client=object())
+    monkeypatch.setattr(image_jobs, '_request_edit', lambda *a, **k: next(images))
+    first = rg.generate_frame(pid, 1, live=True, budget_usd=1, request_id='v1')
+    second = rg.generate_frame(pid, 1, live=True, budget_usd=1, request_id='v2', force=True)
     assert first['generated_file'] != second['generated_file']
     assert Path(first['generated_file']).read_bytes() == PNG
