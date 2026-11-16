@@ -144,7 +144,7 @@ submits a new paid request.
 Remaining limits: `PAUSED` still has no legacy status mapping; real paid recovery
 and the paid UI generation path have not been verified end-to-end. Narration, TTS
 and reference-image live generation are now persistent Jobs (M1-E2); Director and
-continuity vision reviews (E3) are still pending.
+continuity vision reviews are now persistent Jobs as well (M1-E3).
 
 ### Persistent narration, TTS and reference-image jobs (M1-E2)
 
@@ -170,6 +170,32 @@ The CLI blocks until the Job reaches a terminal state and never claims success
 for a blocked or failed Job. Unknown outcomes retain their reservation and leave
 the Job `BLOCKED`; check the provider bill before resolving an unknown request,
 and never blindly resubmit.
+
+### Persistent vision review jobs (M1-E3)
+
+Director per-shot vision review and continuity per-pair vision review are now
+persistent Jobs, alongside the Guided, narration, TTS and reference-image jobs
+above. Each paid request still requires the explicit `--live` confirmation, a
+positive `--budget`, and an idempotency request ID (supplied explicitly or
+derived from the request).
+
+- **Director** opens one shared Run and one `vision_review` Job per selected
+  shot (payload `kind` is `director`).
+- **Continuity** opens one shared Run and one `vision_review` Job per ready
+  boundary pair (payload `kind` is `continuity`).
+- Both report types share the single `vision_review` Job kind. The CLI and API
+  wait for the Jobs and report the `review_id` (a stable digest of the request
+  ID), the shared `run_id`, and a per-shot/per-pair status; a standalone Worker
+  (`uv run studio worker`) is an alternative executor to the CLI/API wait.
+- Partial failures remain in the assembled report (`partial` is true) rather
+  than being hidden, and a partial or blocked review exits non-zero.
+- Unknown outcomes retain their reservation and leave the Job `BLOCKED`; check
+  the provider bill before resolving an unknown request, and never blindly
+  resubmit.
+- New paid submissions create Job/Attempt/Event rows and never write legacy
+  attempt rows.
+
+E3 is implemented in this branch; its tests never call a real paid vision API.
 
 ## Install
 ```bash
@@ -225,7 +251,8 @@ reviews with attempted shots are saved independently under
 `studio-data/PROJECT_ID/director-reviews/REVIEW_ID/review.json` (or
 `STUDIO_HOME`). Still frames cannot prove continuous action, and model results
 require human review. See [the v0.9.1 guide](README-v0.9.1.md) for budget,
-configuration and report details.
+configuration and report details. Live reviews are persistent Jobs; see
+**Persistent vision review jobs (M1-E3)**.
 
 ### Director workspace in React Studio
 
@@ -291,7 +318,8 @@ saved separately under
 are unchanged. The per-pair ceiling is a user-provided reservation, **not** a
 provider-enforced spending cap; failed requests can still incur charges.
 Four still frames cannot prove continuous action, and model judgments require
-human review. See [the v0.9.5 guide](README-v0.9.5.md) for API details.
+human review. See [the v0.9.5 guide](README-v0.9.5.md) for API details. Live
+reviews are persistent Jobs; see **Persistent vision review jobs (M1-E3)**.
 
 ## Local visual editor
 

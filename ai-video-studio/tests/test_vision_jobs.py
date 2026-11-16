@@ -253,6 +253,29 @@ def test_director_cli_partial_failure_exits_nonzero(director_report, monkeypatch
     assert 'partial' in result.output.lower() or 'blocked' in result.output.lower()
 
 
+def test_director_and_continuity_reviews_share_job_truth(
+        director_report, continuity_report, monkeypatch):
+    from studio import continuity_vision
+    pid, director_report_id = director_report
+    continuity_pid, continuity_report_id = continuity_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    monkeypatch.setattr(continuity_vision, 'execute_pair',
+                        lambda payload: PAIR_RESULT)
+    director = director_vision.review(pid, director_report_id, 'm', live=True,
+                                      budget_usd=1, per_shot_ceiling_usd=0.2,
+                                      request_id='d1')
+    continuity = continuity_vision.review(continuity_pid, continuity_report_id,
+                                          'm', live=True, budget_usd=1,
+                                          per_pair_ceiling_usd=0.2,
+                                          request_id='c1')
+    assert director['review_id'] != continuity['review_id']
+    assert all(jobs.get(job_id)['kind'] == 'vision_review'
+               for job_id in director['job_ids'] + continuity['job_ids'])
+
+
 def test_continuity_api_keeps_report_shape_with_one_failed_pair(
         api, continuity_report, monkeypatch):
     from studio import continuity_vision
