@@ -135,7 +135,7 @@ def test_invalid_provider_image_fails_with_reserved_cost(tmp_path, monkeypatch):
 
 
 def test_image_missing_key_fails_and_releases(tmp_path, monkeypatch):
-    from studio import jobs, request_jobs, worker
+    from studio import image_jobs, jobs, request_jobs, worker
     from studio.handlers import register_all
     register_all()
     monkeypatch.setattr(core, 'HOME', tmp_path)
@@ -145,6 +145,7 @@ def test_image_missing_key_fails_and_releases(tmp_path, monkeypatch):
     character_id, revision = state['characters'][0]['id'], state['revision']
     images.generate_character(pid, character_id, MODEL, 1, confirm_paid=True, request_id='a', revision=revision)
     job = request_jobs.find(pid, kind='image', request_id='a')
+    monkeypatch.setattr(image_jobs, 'load_dotenv', lambda: None)
     monkeypatch.delenv('STUDIO_IMAGE_API_KEY', raising=False)
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     assert worker.run_once() == job['id']

@@ -206,6 +206,7 @@ def test_storyboard_missing_key_fails_without_attempt_or_cost(guided_storyboard_
     from studio.handlers import register_all
     register_all()
     pid = guided_storyboard_job['project_id']
+    monkeypatch.setattr(gs, 'load_dotenv', lambda: None)
     monkeypatch.delenv('STUDIO_LLM_API_KEY', raising=False)
     monkeypatch.setattr(core, '_llm_json', lambda *a: pytest.fail('no request without a key'))
     assert worker.run_once() == guided_storyboard_job['id']
