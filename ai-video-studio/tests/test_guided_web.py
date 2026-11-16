@@ -24,6 +24,100 @@ def make_project(api):
     return pid
 
 
+def _block_job(pid, job, reason='unknown_remote'):
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason=? WHERE id=?",
+                   (reason, job['id']))
+    return job
+
+
+@pytest.fixture
+def blocked_project(api):
+    return make_project(api)
+
+
+@pytest.fixture
+def blocked_plan_job(blocked_project):
+    from studio import request_jobs
+    pid = blocked_project
+    job = request_jobs.submit(pid, kind='llm_storyboard', request_id='blocked-plan',
+                              payload={'request_id': 'blocked-plan', 'brief': 'Elephant in rainforest',
+                                       'model': 'fake', 'duration': 20, 'allowed_durations': [5, 10, 20],
+                                       'fixed_durations': None, 'character_stage': False, 'revision': 0,
+                                       'budget_usd': 1},
+                              budget_usd=1, target_key='storyboard')
+    return _block_job(pid, job)
+
+
+@pytest.fixture
+def blocked_image_job(blocked_project):
+    from studio import request_jobs
+    pid = blocked_project
+    job = request_jobs.submit(pid, kind='image', request_id='blocked-image',
+                              payload={'target': 'character', 'project_id': pid,
+                                       'target_id': 'character-1', 'model': 'gpt-image-2.5-sunburst',
+                                       'budget_usd': 1, 'request_id': 'blocked-image',
+                                       'prompt': 'Character reference portrait'},
+                              budget_usd=1, target_key='character:character-1')
+    return _block_job(pid, job)
+
+
+@pytest.fixture
+def blocked_prompt_job(blocked_project):
+    from studio import request_jobs
+    pid = blocked_project
+    job = request_jobs.submit(pid, kind='llm_prompt', request_id='blocked-prompt',
+                              payload={'project_id': pid, 'boundary_id': 'boundary-1',
+                                       'model': 'gpt-4o-mini', 'budget_usd': 1,
+                                       'request_id': 'blocked-prompt', 'source_sha256': 'abc',
+                                       'prompt_payload': {'role': 'transition', 'shots': []},
+                                       'revision': 0},
+                              budget_usd=1, target_key='prompt:boundary-1')
+    return _block_job(pid, job)
+
+
+def test_attempt_lists_survive_blocked_jobs(api, blocked_plan_job, blocked_image_job, blocked_prompt_job):
+    base = f"/api/projects/{blocked_plan_job['project_id']}/guided"
+    for path in ('/plan/attempts', '/image-attempts', '/prompt-attempts'):
+        response = api.get(base + path)
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+        assert any(row['status'] in ('UNKNOWN', 'FAILED') for row in response.json())
+
+
+def _paused_job(pid, kind, request_id, target_key, payload):
+    from studio import request_jobs
+    job = request_jobs.submit(pid, kind=kind, request_id=request_id,
+                              payload=payload, budget_usd=1, target_key=target_key)
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='PAUSED' WHERE id=?", (job['id'],))
+    return job
+
+
+def test_attempt_lists_skip_unmappable_jobs(api, blocked_plan_job, blocked_image_job, blocked_prompt_job):
+    pid = blocked_plan_job['project_id']
+    base = f'/api/projects/{pid}/guided'
+    _paused_job(pid, 'llm_storyboard', 'paused-plan', 'storyboard-paused', {
+        'request_id': 'paused-plan', 'model': 'fake', 'budget_usd': 1})
+    _paused_job(pid, 'image', 'paused-image', 'character:paused', {
+        'target': 'character', 'project_id': pid, 'target_id': 'character-paused',
+        'model': 'gpt-image-2.5-sunburst', 'budget_usd': 1, 'request_id': 'paused-image',
+        'prompt': 'Character reference portrait'})
+    _paused_job(pid, 'llm_prompt', 'paused-prompt', 'prompt:paused', {
+        'project_id': pid, 'boundary_id': 'boundary-paused', 'model': 'gpt-4o-mini',
+        'budget_usd': 1, 'request_id': 'paused-prompt', 'source_sha256': 'abc',
+        'prompt_payload': {'role': 'transition', 'shots': []}, 'revision': 0})
+    # An unmappable (PAUSED) Job must not crash the list; supported rows remain.
+    for path, blocked_id in (('/plan/attempts', 'blocked-plan'),
+                             ('/image-attempts', 'blocked-image'),
+                             ('/prompt-attempts', 'blocked-prompt')):
+        response = api.get(base + path)
+        assert response.status_code == 200
+        rows = response.json()
+        assert any(row['request_id'] == blocked_id and row['status'] in ('UNKNOWN', 'FAILED')
+                   for row in rows)
+
+
 def test_guided_api_default_preview_and_paid_gate(api, monkeypatch):
     pid = make_project(api)
     monkeypatch.setattr(core, '_llm_json', lambda *args: pytest.fail('unexpected paid call'))

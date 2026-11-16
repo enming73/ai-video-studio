@@ -183,6 +183,22 @@ def _plan_jobs(conn, pid):
         'ORDER BY created DESC', (pid,))]
 
 
+def _project_rows(jobs_rows, project):
+    """Project each Job, skipping entries whose state cannot be mapped.
+
+    A single unmappable entry (for example a ``PAUSED`` Job) must not take down
+    the whole list; the per-entry projection helper still raises ``ValueError``
+    when that entry is addressed directly.
+    """
+    records = []
+    for job in jobs_rows:
+        try:
+            records.append(project(job))
+        except ValueError:
+            continue
+    return records
+
+
 def plan_attempt_records(pid: str, db=None) -> list[dict]:
     """Historical planning rows plus llm_storyboard Job projections, jobs first."""
     with job_runner._conn(db) as conn:
@@ -190,7 +206,7 @@ def plan_attempt_records(pid: str, db=None) -> list[dict]:
         jobs_rows = _plan_jobs(conn, pid)
         legacy = [dict(row) for row in conn.execute(
             'SELECT * FROM guided_planning_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
-    return [project_plan_job(job) for job in jobs_rows] + legacy
+    return _project_rows(jobs_rows, project_plan_job) + legacy
 
 
 def find_plan(pid: str, request_id: str, db=None) -> dict:
@@ -280,7 +296,7 @@ def image_attempt_records(pid: str, db=None) -> list[dict]:
         jobs_rows = _image_jobs(conn, pid)
         legacy = [{k: row[k] for k in _IMAGE_FIELDS} for row in conn.execute(
             'SELECT * FROM guided_image_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
-    records = [project_image_job(job) for job in jobs_rows] + legacy
+    records = _project_rows(jobs_rows, project_image_job) + legacy
     unique = {}
     for row in records:
         unique.setdefault(row['id'], row)
@@ -384,7 +400,7 @@ def prompt_attempt_records(pid: str, db=None) -> list[dict]:
         jobs_rows = _prompt_jobs(conn, pid)
         legacy = [{k: row[k] for k in _PROMPT_FIELDS} for row in conn.execute(
             'SELECT * FROM guided_boundary_prompt_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
-    records = [project_prompt_job(job) for job in jobs_rows] + legacy
+    records = _project_rows(jobs_rows, project_prompt_job) + legacy
     unique = {}
     for row in records:
         unique.setdefault(row['id'], row)

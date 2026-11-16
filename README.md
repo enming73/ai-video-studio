@@ -116,6 +116,35 @@ Automated coverage uses fake providers and local media; real paid UI generation
 and real-provider recovery have not been verified. Image, LLM, TTS and vision
 paths are outside D2. See also [the guided workflow guide](docs/guided-workflow.md).
 
+### Persistent Guided storyboard, image and prompt jobs (M1-E1)
+
+Guided storyboard planning (`llm_storyboard`), character and boundary-frame
+images (`image`), and boundary prompts (`llm_prompt`) are now persistent Jobs,
+alongside Guided video. Every paid request still requires explicit confirmation,
+a positive budget, and an idempotency request ID, and the worker must be running
+to execute it: `uv run studio worker` from `ai-video-studio/`, or `studio web`
+with its embedded worker. New paid submissions create Job/Attempt/Event rows and
+never write `guided_planning_attempts`, `guided_image_attempts`, or
+`guided_boundary_prompt_attempts`, so those historical rows stay readable without
+dual-writing.
+
+`GET /api/projects/{pid}/guided/plan/attempts`, `/image-attempts`, and
+`/prompt-attempts` keep their URLs and response fields, merging historical rows
+with read-only Job projections. A `BLOCKED` Job whose outcome is unknown projects
+as `UNKNOWN` (other block reasons project as `FAILED`) and does not break the
+list; a Job whose state has no legacy mapping (for example `PAUSED`) is skipped
+from the list and raises an explicit compatibility error only when that entry is
+addressed directly. Inspect and resume such Jobs through the Job API.
+
+Unknown image or prompt requests remain blocked until the provider bill is
+checked and the attempt is resolved with `confirm_checked=true`; never blindly
+resubmit. Recovery only attaches or queries a verified remote ID and never
+submits a new paid request.
+
+Remaining limits: `PAUSED` still has no legacy status mapping; real paid recovery
+and the paid UI generation path have not been verified end-to-end; narration/TTS
+(E2) and Director/continuity vision reviews (E3) are still pending.
+
 ## Install
 ```bash
 cd vbench && uv sync --extra test

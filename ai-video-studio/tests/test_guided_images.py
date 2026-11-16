@@ -138,6 +138,22 @@ def test_image_attempts_merge_legacy_and_jobs(project):
     assert guided_compat.find_image(pid, rows[0]['id'])['request_id'] == 'new'
 
 
+def test_image_projection_raises_unmappable_status(project):
+    from studio import guided_compat, jobs, request_jobs
+    pid, cid, rev = project
+    job = request_jobs.submit(pid, kind='image', request_id='paused-img',
+                              payload={'target': 'character', 'project_id': pid, 'target_id': cid,
+                                       'model': MODEL, 'budget_usd': 1, 'request_id': 'paused-img',
+                                       'prompt': 'Character reference portrait'},
+                              budget_usd=1, target_key='character:paused-img')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='PAUSED' WHERE id=?", (job['id'],))
+    with pytest.raises(ValueError, match='Unsupported image'):
+        guided_compat.project_image_job(jobs.get(job['id']))
+    # The list skips the unmappable entry instead of raising.
+    assert guided_compat.image_attempt_records(pid) == []
+
+
 def test_selecting_video_from_current_boundaries_resolves_old_video_decision(tmp_path, monkeypatch):
     from studio import timeline, guided_boundaries as boundaries
     from tests.helpers import add_version

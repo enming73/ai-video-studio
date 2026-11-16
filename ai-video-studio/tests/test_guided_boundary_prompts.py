@@ -212,6 +212,25 @@ def test_prompt_is_scoped_to_the_project(boundary_project):
         boundaries.prompt_state('not-a-project', state['boundaries'][1]['id'])
 
 
+def test_prompt_projection_raises_unmappable_status(boundary_project):
+    from studio import request_jobs
+    pid, state = boundary_project
+    boundary_id = state['boundaries'][1]['id']
+    job = request_jobs.submit(pid, kind='llm_prompt', request_id='paused-prompt',
+                              payload={'project_id': pid, 'boundary_id': boundary_id,
+                                       'model': 'gpt-4o-mini', 'budget_usd': 1,
+                                       'request_id': 'paused-prompt', 'source_sha256': 'abc',
+                                       'prompt_payload': {'role': 'transition', 'shots': []},
+                                       'revision': 0},
+                              budget_usd=1, target_key='prompt:paused-prompt')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='PAUSED' WHERE id=?", (job['id'],))
+    with pytest.raises(ValueError, match='Unsupported prompt'):
+        guided_compat.project_prompt_job(jobs.get(job['id']))
+    # The list skips the unmappable entry instead of raising.
+    assert guided_compat.prompt_attempt_records(pid) == []
+
+
 def test_prompt_routes(boundary_project, llm):
     pid, state = boundary_project
     with core.connect() as db:
