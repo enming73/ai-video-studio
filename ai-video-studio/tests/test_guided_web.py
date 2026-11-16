@@ -77,17 +77,61 @@ def test_guided_shot_description_can_be_edited(api):
 def test_duplicate_planning_request_is_not_recharged(api, monkeypatch):
     pid = make_project(api)
     calls = []
-    def llm(*args):
-        calls.append(1)
-        return {'character_bible': {}, 'shots': [{'prompt': 'An elephant walks through a forest.', 'duration': 20}]}
-    monkeypatch.setattr(core, '_llm_json', llm)
+    monkeypatch.setattr(core, '_llm_json', lambda *args: calls.append(1) or pytest.fail('unexpected paid call'))
     base = f'/api/projects/{pid}/guided'
     body = {'model': 'fake', 'revision': 0, 'budget_usd': 1, 'confirm_paid': True, 'request_id': 'unique'}
     first = api.post(base + '/plan', json=body)
     second = api.post(base + '/plan', json=body)
     assert first.status_code == second.status_code == 200
-    assert len(calls) == 1
-    assert first.json()['draft'] == second.json()['draft']
+    assert len(calls) == 0
+    assert first.json()['status'] == 'QUEUED'
+    assert first.json() == second.json()
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM guided_planning_attempts').fetchone()[0] == 0
+
+
+def test_plan_resolve_requires_confirmation_and_acknowledges(api, monkeypatch):
+    import json
+    from studio import attempts, jobs, request_jobs
+    pid = make_project(api)
+    base = f'/api/projects/{pid}/guided'
+    monkeypatch.setattr(core, '_llm_json', lambda *args: pytest.fail('unexpected paid call'))
+    body = {'model': 'fake', 'revision': 0, 'budget_usd': 1, 'confirm_paid': True, 'request_id': 'plan-1'}
+    queued = api.post(base + '/plan', json=body).json()
+    assert queued['status'] == 'QUEUED'
+    job = request_jobs.find(pid, kind='llm_storyboard', request_id='plan-1')
+    attempt = attempts.create(job['id'], provider='llm', model='fake',
+                              input_data=json.loads(job['payload_json']))
+    attempts.prepare_submission(attempt['id'], amount_microusd=1_000_000, pricing_version='test:v1')
+    attempts.mark_unknown(attempt['id'], 'uncertain submission')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?",
+                   (job['id'],))
+    listed = api.get(base + '/plan/attempts').json()
+    assert any(r['request_id'] == 'plan-1' and r['status'] == 'UNKNOWN' for r in listed)
+    rejected = api.post(base + '/plan/attempts/plan-1/resolve', json={})
+    assert rejected.status_code == 400
+    assert 'confirmation' in rejected.json()['detail']
+    resolved = api.post(base + '/plan/attempts/plan-1/resolve', json={'confirm_checked': True})
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()['status'] == 'ACKNOWLEDGED'
+    with core.connect() as db:
+        assert jobs.get(job['id'], db=db)['status'] == 'CANCELLED'
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE attempt_id=?',
+                          (attempt['id'],)).fetchone()[0] == 'reserved'
+
+
+def test_plan_resolve_legacy_row_requires_confirmation(api):
+    pid = make_project(api)
+    base = f'/api/projects/{pid}/guided'
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_planning_attempts VALUES (?,?,?,?,?,?,?)',
+                   (pid, 'legacy-plan', 'UNKNOWN', 'm', 1, None, 'failure'))
+    rejected = api.post(base + '/plan/attempts/legacy-plan/resolve', json={})
+    assert rejected.status_code == 400
+    resolved = api.post(base + '/plan/attempts/legacy-plan/resolve', json={'confirm_checked': True})
+    assert resolved.status_code == 200
+    assert resolved.json()['status'] == 'ACKNOWLEDGED'
 
 
 @pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg/ffprobe required')

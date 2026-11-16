@@ -49,6 +49,23 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
     setBoundaryId(old => (old && s.boundaries?.some(b => b.id === old)) ? old : null);
     return s;
   };
+  const planAttemptKey = planAttempts
+    .filter(a => ['QUEUED','SUBMITTING'].includes(a.status) && !a.error)
+    .map(a => `${a.request_id}:${a.status}`).join('|');
+  useEffect(() => {
+    if (!planAttemptKey) return;
+    const timer = setInterval(async () => {
+      try {
+        const plans = await call(root + '/plan/attempts');
+        setPlanAttempts(plans);
+        if (plans.some(a => a.status === 'COMPLETED')) {
+          await refresh();
+          onPlanned?.();
+        }
+      } catch (e) { setMessage(e.message); }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pid, planAttemptKey]);
   useEffect(() => {setState(null); setDraft(null); setSeq(null); setBoundaryId(null); setStructure(null); setPlanPreview(null); setShotPreview(null); setRender(null);
     refresh().catch(e => setMessage(e.message));}, [pid]);
   const shot = state?.shots.find(s => s.seq === seq);
@@ -96,11 +113,11 @@ export default function GuidedProductionWorkspace({pid, onPlanned}) {
         <button disabled={busy || Number(budget)<=0} onClick={()=>run(async()=>{
           if(!window.confirm(`确认将故事发送给 ${model} 进行付费分镜？\n本次预算预留 $${budget}，不是供应商账单硬上限。`)) return;
           await call(root+'/plan','POST',{model,budget_usd:Number(budget),confirm_paid:true,revision:state.revision,request_id:crypto.randomUUID()});
-          await refresh(); onPlanned?.();})}>授权并生成分镜</button></>}
-      {planAttempts.filter(a=>['SUBMITTING','UNKNOWN'].includes(a.status)).map(a=><div className="guided-warning" key={a.request_id}>
+          await refresh();})}>授权并生成分镜</button></>}
+      {planAttempts.filter(a=>a.status === 'UNKNOWN' || a.error).map(a=><div className="guided-warning" key={a.request_id}>
         上次 LLM 请求结果不明，可能已经计费：{a.error || a.status}。请先核查供应商账单。
         <button disabled={busy} onClick={()=>run(async()=>{if(!window.confirm('确认已核查此请求，允许以后重新授权？'))return;
-          await call(root+`/plan/attempts/${encodeURIComponent(a.request_id)}/resolve`,'POST'); await refresh();})}>已核查，解除阻止</button></div>)}
+          await call(root+`/plan/attempts/${encodeURIComponent(a.request_id)}/resolve`,'POST',{confirm_checked:true}); await refresh();})}>已核查，解除阻止</button></div>)}
       <GuidedCharacters pid={pid} state={state} call={call} run={run} refresh={refresh} onRoles={setCastState}/>
       {draft && <><h3>分镜审阅 · {total} / {project?.duration} 秒</h3>
         {draft.shots.map((s,i)=><article className="guided-card" key={i}><h4>镜头 {i+1}</h4>

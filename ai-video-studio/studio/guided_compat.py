@@ -122,6 +122,91 @@ def reconcile_outputs(pid):
                 timeline._register(db, pid, shot, 'job:' + job['id'], file)
 
 
+def _plan_status(job: dict, attempt: dict | None) -> tuple[str, str | None]:
+    """Map an llm_storyboard Job to the legacy planning status/error pair."""
+    job_status = job['status']
+    detail = job['error_detail'] or job['block_reason']
+    if job_status in ('PENDING', 'RUNNING'):
+        if attempt is None:
+            return 'QUEUED', None
+        a = attempt['status']
+        if a in ('PLANNED', 'RESERVED'):
+            return 'QUEUED', None
+        if a == 'SUBMITTING':
+            return 'SUBMITTING', None
+        if a == 'COMPLETED':
+            return 'COMPLETED', None
+        if a in ('FAILED_FINAL', 'FAILED_RETRYABLE'):
+            return 'FAILED', attempt.get('error_detail') or detail
+        if a == 'UNKNOWN_REMOTE_STATE':
+            return 'UNKNOWN', attempt.get('error_detail') or detail
+        if a == 'ABANDONED':
+            return 'ACKNOWLEDGED', None
+        raise ValueError(f'Unsupported plan attempt status: {a}')
+    if job_status == 'SUCCEEDED':
+        return 'COMPLETED', None
+    if job_status == 'BLOCKED':
+        if job['block_reason'] == 'unknown_remote':
+            return 'UNKNOWN', detail
+        return 'FAILED', detail
+    if job_status == 'FAILED':
+        return 'FAILED', detail
+    if job_status == 'CANCELLED':
+        return 'ACKNOWLEDGED', None
+    raise ValueError(f'Unsupported plan job status: {job_status}')
+
+
+def project_plan_job(job: dict, *, db=None) -> dict:
+    """Project an llm_storyboard Job into the legacy planning-attempt shape."""
+    if job.get('kind') != 'llm_storyboard':
+        raise ValueError('Unsupported plan job kind')
+    payload = json.loads(job['payload_json'])
+    with job_runner._conn(db) as conn:
+        attempt = jobs.latest_attempt(job['id'], db=conn)
+        output = json.loads((attempt or {}).get('output_json') or '{}')
+        output.update(json.loads(job['output_json'] or '{}'))
+    status, error = _plan_status(job, attempt)
+    return {
+        'project_id': job['project_id'],
+        'request_id': payload['request_id'],
+        'status': status,
+        'model': payload['model'],
+        'budget_usd': payload['budget_usd'],
+        'result_json': json.dumps(output['result']) if 'result' in output else None,
+        'error': error,
+    }
+
+
+def _plan_jobs(conn, pid):
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM jobs WHERE project_id=? AND kind='llm_storyboard' "
+        'ORDER BY created DESC', (pid,))]
+
+
+def plan_attempt_records(pid: str, db=None) -> list[dict]:
+    """Historical planning rows plus llm_storyboard Job projections, jobs first."""
+    with job_runner._conn(db) as conn:
+        guided_workflow._row(conn, pid)
+        jobs_rows = _plan_jobs(conn, pid)
+        legacy = [dict(row) for row in conn.execute(
+            'SELECT * FROM guided_planning_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    return [project_plan_job(job) for job in jobs_rows] + legacy
+
+
+def find_plan(pid: str, request_id: str, db=None) -> dict:
+    """Legacy planning row first; otherwise the llm_storyboard Job projection."""
+    from . import request_jobs
+    with job_runner._conn(db) as conn:
+        row = conn.execute('SELECT * FROM guided_planning_attempts WHERE project_id=? AND request_id=?',
+                           (pid, request_id)).fetchone()
+        if row:
+            return dict(row)
+        job = request_jobs.find(pid, kind='llm_storyboard', request_id=request_id, db=conn)
+        if job:
+            return project_plan_job(job, db=conn)
+        raise ValueError('Unknown planning attempt')
+
+
 def asset_provenance(db, pid, shot_id, asset_id):
     """Boundary snapshot for an asset registered from a Guided Job."""
     row = db.execute(
