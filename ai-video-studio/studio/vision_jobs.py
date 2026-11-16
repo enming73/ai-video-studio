@@ -96,3 +96,64 @@ def enqueue_director(pid: str, report_id: str, model: str, base_url,
     return {'review_id': review_id, 'run_id': created[0]['run_id'],
             'job_ids': [j['id'] for j in created], 'request_id': request_id,
             'estimate': estimate}
+
+
+def enqueue_continuity(pid: str, report_id: str, model: str, base_url,
+                       budget_usd: float, per_pair_ceiling_usd: float,
+                       pairs, request_id: str | None = None) -> dict:
+    """Validate the continuity report and enqueue one ``vision_review`` Job per
+    ready boundary pair.
+
+    Refuses to create any Job when the total reserved ceiling exceeds the budget.
+    The batch shares one Run; the ``review_id`` is a stable 12-hex digest of the
+    request id, so a replay writes the same review directory.
+    """
+    from . import continuity_vision
+    _, targets = continuity_vision._targets(pid, report_id, pairs)
+    reserve = round(len(targets) * per_pair_ceiling_usd, 6)
+    estimate = {'pairs': len(targets),
+                'per_pair_ceiling_usd': per_pair_ceiling_usd,
+                'reserved_ceiling_usd': reserve, 'budget_usd': budget_usd,
+                'within_budget': reserve <= budget_usd}
+    if not estimate['within_budget']:
+        raise ValueError('Budget insufficient: no requests made')
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError('Model is required')
+    if not targets:
+        raise ValueError('No pairs to review')
+    if request_id is None:
+        request_id = _batch_key(
+            'continuity', report_id, model, pairs,
+            (budget_usd, per_pair_ceiling_usd))
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        raise ValueError('Request id required')
+    review_id = hashlib.sha256(request_id.encode('utf-8')).hexdigest()[:12]
+    endpoint = (base_url or os.environ.get('OPENAI_BASE_URL')
+                or 'https://api.openai.com/v1').rstrip('/')
+    per_pair_micro = ledger.to_micro(per_pair_ceiling_usd)
+    run_key = f'continuity:{request_id}'
+    created = []
+    for b in targets:
+        payload = {
+            'kind': 'continuity',
+            'project_id': pid,
+            'report_id': report_id,
+            'review_id': review_id,
+            'from_seq': b['from_seq'],
+            'to_seq': b['to_seq'],
+            'from_prompt': b['from_prompt'],
+            'to_prompt': b['to_prompt'],
+            'frames': [f['file'] for f in b['frames']['out'] + b['frames']['in']],
+            'source_asset_ids': [b['from_asset_id'], b['to_asset_id']],
+            'model': model,
+            'base_url': endpoint,
+            'budget_microusd': per_pair_micro,
+        }
+        job = request_jobs.submit(
+            pid, kind='vision_review', request_id=f'{review_id}:{b["from_seq"]}',
+            payload=payload, budget_usd=budget_usd,
+            target_key=f'continuity:{report_id}:{b["from_seq"]}', run_key=run_key)
+        created.append(job)
+    return {'review_id': review_id, 'run_id': created[0]['run_id'],
+            'job_ids': [j['id'] for j in created], 'request_id': request_id,
+            'estimate': estimate}

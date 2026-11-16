@@ -355,12 +355,14 @@ class ContinuityVisionRequest(BaseModel):
     budget_usd: float = Field(default=0,ge=0,le=10000)
     per_pair_ceiling_usd: float = Field(default=0.10,gt=0,le=100)
     pairs: list[int] | None = None
+    request_id: str | None = None
 
 @app.post('/api/projects/{pid}/director/continuity-vision')
 def continuity_vision_review(pid: str, body: ContinuityVisionRequest):
     from . import continuity_vision
     return api_call(continuity_vision.review,pid,body.report_id,body.model,live=body.live,
-                    budget_usd=body.budget_usd,per_pair_ceiling_usd=body.per_pair_ceiling_usd,pairs=body.pairs)
+                    budget_usd=body.budget_usd,per_pair_ceiling_usd=body.per_pair_ceiling_usd,
+                    pairs=body.pairs,request_id=body.request_id)
 
 @app.get('/api/projects/{pid}/director/continuity-vision')
 def continuity_vision_reports(pid: str):

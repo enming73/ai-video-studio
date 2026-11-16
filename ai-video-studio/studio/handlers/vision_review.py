@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from .. import director_vision, jobs, ledger, vision_jobs
+from .. import continuity_vision, director_vision, jobs, ledger, vision_jobs
 
 
 def execute(job, attempts, control):
@@ -26,6 +26,8 @@ def execute(job, attempts, control):
     try:
         if payload['kind'] == 'director':
             result = director_vision.execute_shot(payload)
+        elif payload['kind'] == 'continuity':
+            result = continuity_vision.execute_pair(payload)
         else:
             raise vision_jobs.PreRequestFailure('Unknown vision review kind')
     except vision_jobs.UnknownRemote as exc:

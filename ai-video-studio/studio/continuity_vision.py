@@ -7,10 +7,10 @@ import base64
 import json
 import os
 import re
-import uuid
+import tempfile
 from pathlib import Path
 import httpx
-from . import core, continuity
+from . import core, continuity, vision_jobs
 
 SYSTEM = """You are a cautious film continuity editor. Compare two ordered frames from
 end of shot A with two ordered frames from start of shot B. Do not assume
@@ -26,6 +26,12 @@ concrete, minimal fix for the NEXT shot's opening, not claim guaranteed results.
 Never imply a paid generation was performed."""
 SEVERITIES={'none','low','medium','high','uncertain'}
 RECOMMENDATIONS={'keep','manual_review','revise_next_opening','revise_previous_ending','insert_bridge'}
+
+NOTE = ('Ceilings are user-provided estimates, not hard provider spending '
+        'caps. Failed requests may incur charges.')
+
+_UNKNOWN_ERRORS = (httpx.HTTPError, OSError, ValueError, KeyError,
+                   IndexError, TypeError)
 
 
 def normalize(data):
@@ -64,59 +70,155 @@ def _targets(pid,rid,pairs=None):
     return source,targets
 
 
-def review(pid,rid,model,*,live=False,budget_usd=0,per_pair_ceiling_usd=0.10,
-           pairs=None,base_url=None,api_key=None,timeout=90):
-    if not 0<per_pair_ceiling_usd<=100 or not 0<=budget_usd<=10000:
+def _post(endpoint, key, model, content):
+    with httpx.Client(timeout=90) as client:
+        response = client.post(
+            endpoint + '/chat/completions',
+            headers={'Authorization': 'Bearer ' + key},
+            json={'model': model,
+                  'messages': [{'role': 'system', 'content': SYSTEM},
+                               {'role': 'user', 'content': content}],
+                  'temperature': 0, 'max_tokens': 1100})
+        response.raise_for_status()
+        return response.json()
+
+
+def _judgement(raw):
+    if isinstance(raw, list):
+        raw = ''.join(x.get('text', '') for x in raw if isinstance(x, dict))
+    if not isinstance(raw, str):
+        raise ValueError('Model returned a non-text judgement')
+    raw = raw.strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+    return normalize(json.loads(raw))
+
+
+def execute_pair(payload):
+    """Perform the single provider POST for one boundary pair and normalize it."""
+    pid = payload['project_id']
+    report_id = payload['report_id']
+    model = payload['model']
+    key = os.environ.get('OPENAI_API_KEY')
+    if not key:
+        raise vision_jobs.PreRequestFailure('OPENAI_API_KEY missing')
+    endpoint = (payload.get('base_url') or os.environ.get('OPENAI_BASE_URL')
+                or 'https://api.openai.com/v1').rstrip('/')
+    if not endpoint.startswith('https://') and not re.fullmatch(
+            r'http://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/.*)?', endpoint):
+        raise vision_jobs.PreRequestFailure('Only HTTPS or local HTTP endpoints allowed')
+    report_root = core.HOME / pid / 'continuity-reports' / report_id
+    content = [{'type': 'text', 'text':
+                f"Shot A #{payload['from_seq']} prompt: {payload['from_prompt']}\n"
+                f"Shot B #{payload['to_seq']} prompt: {payload['to_prompt']}\n"
+                'Images 1-2 are END of A; images 3-4 are START of B. '
+                'Explain visible evidence and offer minimal fix if needed.'}]
+    try:
+        for frame_path in payload['frames']:
+            content.append(_frame({'file': frame_path}, report_root))
+    except (ValueError, OSError) as exc:
+        raise vision_jobs.PreRequestFailure(str(exc)) from exc
+    try:
+        data = _post(endpoint, key, model, content)
+        raw = data['choices'][0]['message']['content']
+    except _UNKNOWN_ERRORS as exc:
+        raise vision_jobs.UnknownRemote(str(exc)) from exc
+    try:
+        judgement = _judgement(raw)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise vision_jobs.PostResponseFailure(str(exc)) from exc
+    return {'from_seq': payload['from_seq'], 'to_seq': payload['to_seq'],
+            'status': 'reviewed', 'review': judgement,
+            'usage': data.get('usage', {}),
+            'source_asset_ids': payload['source_asset_ids']}
+
+
+def _atomic_write(target, text):
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix='.review-',
+                               suffix='.json')
+    os.close(fd)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        os.replace(tmp, str(target))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def assemble(pid, jobs, *, report_id, model, estimate, review_id, run_id,
+             request_id) -> dict:
+    """Build the report shape from finished Jobs and persist it atomically."""
+    ordered = sorted(jobs, key=lambda j: json.loads(j['payload_json'])['from_seq'])
+    results = []
+    pairs = []
+    for job in ordered:
+        payload = json.loads(job['payload_json'])
+        pairs.append({'from_seq': payload['from_seq'],
+                      'to_seq': payload['to_seq']})
+        if job['status'] == 'SUCCEEDED':
+            results.append(json.loads(job['output_json'] or '{}'))
+        else:
+            detail = (job.get('error_detail') or job.get('error_class')
+                      or job.get('block_reason') or job['status'])
+            results.append({'from_seq': payload['from_seq'],
+                            'to_seq': payload['to_seq'], 'status': 'error',
+                            'error': str(detail)[:300]})
+    report = {
+        'schema_version': 1,
+        'project_id': pid,
+        'source_report_id': report_id,
+        'mode': 'vision_live',
+        'model': model,
+        'budget_usd': estimate['budget_usd'],
+        'per_pair_ceiling_usd': estimate['per_pair_ceiling_usd'],
+        'reserved_ceiling_usd': estimate['reserved_ceiling_usd'],
+        'within_budget': estimate['within_budget'],
+        'pairs': pairs,
+        'paid_api_calls': len(jobs),
+        'results': results,
+        'note': NOTE,
+        'review_id': review_id,
+        'run_id': run_id,
+        'job_ids': [j['id'] for j in ordered],
+        'request_id': request_id,
+        'partial': any(r['status'] == 'error' for r in results),
+    }
+    output_root = core.HOME / pid / 'continuity-vision-reviews' / review_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    _atomic_write(output_root / 'review.json',
+                  json.dumps(report, ensure_ascii=False, indent=2))
+    return report
+
+
+def review(pid, rid, model, *, live=False, budget_usd=0,
+           per_pair_ceiling_usd=0.10, pairs=None, base_url=None, api_key=None,
+           timeout=90, request_id=None):
+    if not 0 < per_pair_ceiling_usd <= 100 or not 0 <= budget_usd <= 10000:
         raise ValueError('Invalid budget')
-    source,targets=_targets(pid,rid,pairs)
-    reserve=round(len(targets)*per_pair_ceiling_usd,6)
-    summary={'schema_version':1,'project_id':pid,'source_report_id':rid,
-             'mode':'vision_live' if live else 'vision_dry_run','model':model,
-             'budget_usd':budget_usd,'per_pair_ceiling_usd':per_pair_ceiling_usd,
-             'reserved_ceiling_usd':reserve,'within_budget':reserve<=budget_usd,
-             'pairs':[{'from_seq':b['from_seq'],'to_seq':b['to_seq']} for b in targets],
-             'paid_api_calls':0,'results':[],
-             'note':'Ceilings are user-provided estimates, not hard provider spending caps. Failed requests may incur charges.'}
-    if not live: return summary
-    if not summary['within_budget']: raise ValueError('Budget insufficient: no API calls made')
-    if not model: raise ValueError('Model required')
-    key=api_key or os.getenv('OPENAI_API_KEY')
-    if not key: raise ValueError('OPENAI_API_KEY missing')
-    endpoint=(base_url or os.getenv('OPENAI_BASE_URL') or 'https://api.openai.com/v1').rstrip('/')
-    if not endpoint.startswith('https://') and not re.fullmatch(r'http://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/.*)?',endpoint):
-        raise ValueError('Only HTTPS or local HTTP endpoints allowed')
-    root=core.HOME/pid/'continuity-reports'/rid
-    dest=core.HOME/pid/'continuity-vision-reviews'/uuid.uuid4().hex[:12]
-    dest.mkdir(parents=True,exist_ok=False)
-    summary['review_id']=dest.name
-    def persist():
-        (dest/'review.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
-    persist()
-    with httpx.Client(timeout=timeout) as client:
-        for b in targets:
-            try:
-                content=[{'type':'text','text':f"Shot A #{b['from_seq']} prompt: {b['from_prompt']}\nShot B #{b['to_seq']} prompt: {b['to_prompt']}\nImages 1-2 are END of A; images 3-4 are START of B. Explain visible evidence and offer minimal fix if needed."}]
-                content += [_frame(f,root) for f in b['frames']['out']+b['frames']['in']]
-                response=client.post(endpoint+'/chat/completions',headers={'Authorization':'Bearer '+key},
-                    json={'model':model,'temperature':0,'max_tokens':1100,'messages':[
-                        {'role':'system','content':SYSTEM},{'role':'user','content':content}]})
-                response.raise_for_status()
-                data=response.json()
-                raw=data['choices'][0]['message']['content']
-                if isinstance(raw,list): raw=''.join(x.get('text','') for x in raw if isinstance(x,dict))
-                raw=raw.strip()
-                if raw.startswith('```'): raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw)
-                judgement=normalize(json.loads(raw))
-                summary['results'].append({'from_seq':b['from_seq'],'to_seq':b['to_seq'],
-                    'status':'reviewed','source_asset_ids':[b['from_asset_id'],b['to_asset_id']],
-                    'review':judgement,'usage':data.get('usage',{})})
-            except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError) as exc:
-                summary['results'].append({'from_seq':b['from_seq'],'to_seq':b['to_seq'],
-                                          'status':'error','error':str(exc)[:300]})
-            finally:
-                summary['paid_api_calls']+=1
-                persist()
-    return summary
+    source, targets = _targets(pid, rid, pairs)
+    reserve = round(len(targets) * per_pair_ceiling_usd, 6)
+    summary = {'schema_version': 1, 'project_id': pid, 'source_report_id': rid,
+               'mode': 'vision_live' if live else 'vision_dry_run', 'model': model,
+               'budget_usd': budget_usd, 'per_pair_ceiling_usd': per_pair_ceiling_usd,
+               'reserved_ceiling_usd': reserve, 'within_budget': reserve <= budget_usd,
+               'pairs': [{'from_seq': b['from_seq'], 'to_seq': b['to_seq']}
+                         for b in targets],
+               'paid_api_calls': 0, 'results': [], 'note': NOTE}
+    if not live:
+        return summary
+    if not summary['within_budget']:
+        raise ValueError('Budget insufficient: no API calls made')
+    if not model:
+        raise ValueError('Model required')
+    from . import job_runner
+    queued = vision_jobs.enqueue_continuity(
+        pid, rid, model, base_url, budget_usd, per_pair_ceiling_usd, pairs,
+        request_id)
+    states = job_runner.run_until(queued['job_ids'])
+    return assemble(pid, states, report_id=rid, model=model,
+                    estimate=queued['estimate'], review_id=queued['review_id'],
+                    run_id=queued['run_id'], request_id=queued['request_id'])
 
 
 def reports(pid):
