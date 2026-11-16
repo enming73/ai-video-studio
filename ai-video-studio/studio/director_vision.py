@@ -116,7 +116,7 @@ def execute_shot(payload):
     try:
         for frame_path in payload['frames']:
             content.append(_image_payload({'file': frame_path}, report_root))
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         raise vision_jobs.PreRequestFailure(str(exc)) from exc
     try:
         data = _post(endpoint, key, model, content)

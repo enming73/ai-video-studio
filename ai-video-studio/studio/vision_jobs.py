@@ -69,9 +69,10 @@ def enqueue_director(pid: str, report_id: str, model: str, base_url,
     endpoint = (base_url or os.environ.get('OPENAI_BASE_URL')
                 or 'https://api.openai.com/v1').rstrip('/')
     per_shot_micro = ledger.to_micro(per_shot_ceiling_usd)
-    batch_key = _batch_key('director', report_id, model, selected,
-                           (budget_usd, per_shot_ceiling_usd))
-    run_key = f'vision:{batch_key}'
+    # The Run's budget scope must match the idempotency identity (the request
+    # id), not the content hash, so a distinct explicit request id over the
+    # same content opens its own Run instead of silently sharing the first.
+    run_key = f'vision:{request_id}'
     created = []
     for shot in shots:
         payload = {

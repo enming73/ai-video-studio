@@ -137,3 +137,47 @@ def test_vision_unknown_remote_blocks_and_retains(director_report, monkeypatch):
     with core.connect() as db:
         assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
                           (queued['job_ids'][0],)).fetchone()[0] == 'reserved'
+
+
+def test_distinct_request_ids_over_same_content_get_independent_runs(
+        director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    first = director_vision.review(pid, report_id, 'model', live=True,
+                                   budget_usd=1, per_shot_ceiling_usd=0.2,
+                                   request_id='a')
+    second = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='b')
+    assert first['run_id'] != second['run_id']
+    assert first['review_id'] != second['review_id']
+    assert set(first['job_ids']) != set(second['job_ids'])
+    # Both batches reserve and execute independently: no budget_exceeded block.
+    assert first['partial'] is False
+    assert second['partial'] is False
+    all_ids = list(first['job_ids']) + list(second['job_ids'])
+    assert all(jobs.get(jid)['status'] == 'SUCCEEDED' for jid in all_ids)
+
+
+def test_frame_read_oserror_releases_reservation(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setenv('OPENAI_API_KEY', 'fake')
+    posted = []
+    monkeypatch.setattr(director_vision, '_image_payload',
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            OSError('frame unreadable')))
+    monkeypatch.setattr(director_vision, '_post',
+                        lambda *a, **k: posted.append('post') or {'choices': []})
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='w3')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'FAILED'
+    assert posted == []
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'

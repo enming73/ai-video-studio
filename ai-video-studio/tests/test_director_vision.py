@@ -46,6 +46,15 @@ def test_execute_shot_pre_request_failure(tmp_path, monkeypatch):
         v.execute_shot(payload)
 
 
+def test_execute_shot_frame_oserror_is_pre_request_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'fake')
+    payload = _shot_payload(tmp_path, monkeypatch)
+    monkeypatch.setattr(v, '_image_payload',
+                        lambda *a, **k: (_ for _ in ()).throw(OSError('unreadable')))
+    with pytest.raises(vision_jobs.PreRequestFailure):
+        v.execute_shot(payload)
+
+
 def test_execute_shot_unknown_remote(tmp_path, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'fake')
     payload = _shot_payload(tmp_path, monkeypatch)
