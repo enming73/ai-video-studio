@@ -316,15 +316,18 @@ def director_review_cmd(project_id: str, report_id: str,
                         budget: float = typer.Option(0.0,help='Maximum reserved USD budget'),
                         per_shot_ceiling: float = typer.Option(0.10,help='Conservative estimated USD cost per shot'),
                         base_url: str = typer.Option(None,help='OpenAI-compatible API base URL'),
-                        shot: list[int] = typer.Option(None,'--shot',help='Repeat to select specific shots')):
+                        shot: list[int] = typer.Option(None,'--shot',help='Repeat to select specific shots'),
+                        request_id: str = typer.Option(None,help='Idempotency key for the paid review batch')):
     """Preview cost or run opt-in visual review; never regenerates video."""
     from . import director_vision
     try:
         result=director_vision.review(project_id,report_id,model,base_url,live,budget,
-                                      per_shot_ceiling,shot or None)
-        console.print_json(json.dumps(result,ensure_ascii=False))
+                                      per_shot_ceiling,shot or None,request_id)
     except (ValueError,RuntimeError) as exc:
         console.print(f'[red]{exc}[/red]'); raise typer.Exit(1)
+    console.print_json(json.dumps(result,ensure_ascii=False))
+    if result.get('partial'):
+        raise typer.Exit(1)
 
 @app.command('worker')
 def worker_cmd(owner: str = typer.Option(None, help='Stable worker owner id'),

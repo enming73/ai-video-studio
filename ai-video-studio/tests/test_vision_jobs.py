@@ -1,0 +1,379 @@
+"""Director vision review jobs: per-shot enqueue, budget gate, partial failure.
+
+These tests never call a real vision API. They monkeypatch
+``director_vision.execute_shot`` to a canned result, or inject an
+``UnknownRemote`` fault so the request never leaves the process.
+"""
+import json
+
+import pytest
+
+from studio import core, director_vision, jobs, vision_jobs
+
+REVIEW_RESULT = {
+    'seq': 1,
+    'status': 'reviewed',
+    'review': {'character_consistency': 5, 'scene_match': 4,
+               'action_match': None, 'visual_quality': 3,
+               'findings': ['ok'], 'uncertainty': 'low',
+               'recommendation': 'keep'},
+    'usage': {'prompt_tokens': 10, 'completion_tokens': 20},
+    'source_asset_id': 'asset-1',
+}
+
+PAIR_RESULT = {
+    'from_seq': 2, 'to_seq': 3, 'status': 'reviewed',
+    'review': {'severity': 'none', 'confidence': 0.9, 'observations': [],
+               'uncertainties': [], 'recommendation': 'keep',
+               'reason': 'continuous', 'proposed_prompt': None},
+    'usage': {'prompt_tokens': 10, 'completion_tokens': 20},
+    'source_asset_ids': ['asset-2', 'asset-3'],
+}
+
+
+@pytest.fixture(autouse=True)
+def handlers():
+    from studio.handlers import register_all
+    register_all()
+
+
+@pytest.fixture
+def director_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('A little elephant in the forest', 10, 'mock', 10)
+    core.plan(pid, 5)
+    report_id = 'a1b2c3d4e5f6'
+    root = tmp_path / pid / 'director-reports' / report_id
+    shots = []
+    for seq in (1, 2):
+        folder = root / f'shot-{seq:03d}'
+        folder.mkdir(parents=True, exist_ok=True)
+        frame = folder / 'frame-01.jpg'
+        frame.write_bytes(b'\xff\xd8\xff\xe0' + b'x' * 64)
+        shots.append({
+            'seq': seq, 'shot_id': f'{pid}-s{seq:03d}',
+            'prompt': f'Shot {seq} prompt', 'planned_duration': 5,
+            'asset_id': f'asset-{seq}', 'checks': {}, 'warnings': [],
+            'frames': [{'time': 1.0, 'file': str(frame)}],
+            'status': 'technical_pass',
+        })
+    report = {'schema_version': 1, 'report_id': report_id, 'project_id': pid,
+              'created': core.now(), 'mode': 'offline_technical_only',
+              'paid_api_calls': 0, 'estimated_api_cost_usd': 0, 'disclaimer': '',
+              'summary': {'total': 2, 'technical_pass': 2, 'needs_review': 0},
+              'shots': shots}
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'report.json').write_text(
+        json.dumps(report, ensure_ascii=False), encoding='utf-8')
+    return pid, report_id
+
+
+@pytest.fixture
+def continuity_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('A little elephant in the forest', 10, 'mock', 10)
+    report_id = 'b2c3d4e5f6a7'
+    root = tmp_path / pid / 'continuity-reports' / report_id
+    root.mkdir(parents=True, exist_ok=True)
+    boundaries = []
+    for from_seq, to_seq in ((2, 3), (3, 4)):
+        folder = root / f'boundary-{from_seq:03d}-{to_seq:03d}'
+        folder.mkdir(parents=True, exist_ok=True)
+        frames = {'out': [], 'in': []}
+        for side in ('out', 'in'):
+            for i in (1, 2):
+                frame = folder / f'{side}-{i}.jpg'
+                frame.write_bytes(b'\xff\xd8\xff\xe0' + b'x' * 64)
+                frames[side].append({'time': 0.0, 'file': str(frame)})
+        boundaries.append({
+            'from_seq': from_seq, 'to_seq': to_seq,
+            'from_prompt': f'Shot {from_seq} prompt',
+            'to_prompt': f'Shot {to_seq} prompt',
+            'from_asset_id': f'asset-{from_seq}',
+            'to_asset_id': f'asset-{to_seq}',
+            'status': 'ready', 'warnings': [], 'frames': frames,
+        })
+    report = {'schema_version': 1, 'report_id': report_id, 'project_id': pid,
+              'created': core.now(), 'mode': 'offline_boundary_evidence',
+              'paid_api_calls': 0, 'estimated_api_cost_usd': 0, 'disclaimer': '',
+              'boundaries': boundaries}
+    (root / 'report.json').write_text(
+        json.dumps(report, ensure_ascii=False), encoding='utf-8')
+    return pid, report_id
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from studio import webapp
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    monkeypatch.setenv('STUDIO_DISABLE_EMBEDDED_WORKER', '1')
+    return TestClient(webapp.app)
+
+
+def test_director_review_creates_one_job_per_shot(director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    result = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='v1')
+    assert len(result['job_ids']) == 2
+    assert result['review_id']
+    assert all(jobs.get(job_id)['kind'] == 'vision_review'
+               for job_id in result['job_ids'])
+
+
+def test_no_jobs_when_total_ceiling_exceeds_budget(director_report):
+    pid, report_id = director_report
+    with pytest.raises(ValueError, match='Budget insufficient'):
+        director_vision.review(pid, report_id, 'model', live=True,
+                               budget_usd=0.1, per_shot_ceiling_usd=0.2,
+                               request_id='v1')
+    with core.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE kind='vision_review'"
+                          ).fetchone()[0] == 0
+
+
+def test_no_jobs_when_pair_ceiling_exceeds_budget(continuity_report):
+    from studio import continuity_vision
+    pid, report_id = continuity_report
+    with pytest.raises(ValueError, match='Budget insufficient'):
+        continuity_vision.review(pid, report_id, 'model', live=True,
+                                 budget_usd=0.1, per_pair_ceiling_usd=0.2,
+                                 request_id='c1')
+    with core.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE kind='vision_review'"
+                          ).fetchone()[0] == 0
+
+
+def test_director_review_marks_partial_failure(director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout'))
+        if payload['seq'] == 2
+        else {**REVIEW_RESULT, 'seq': payload['seq'],
+              'source_asset_id': payload['source_asset_id']})
+    result = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='v1')
+    assert result['results'][1]['status'] == 'error'
+    assert result['paid_api_calls'] == 2
+    with core.connect() as db:
+        assert db.execute(
+            "SELECT status FROM jobs WHERE request_key LIKE 'vision_review:%' "
+            'ORDER BY created').fetchall()
+
+
+def test_vision_pre_request_releases_reservation(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(
+            vision_jobs.PreRequestFailure('missing key')))
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='w1')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'FAILED'
+    with core.connect() as db:
+        row = db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                         (queued['job_ids'][0],)).fetchone()
+        assert row is not None and row[0] == 'released'
+
+
+def test_vision_unknown_remote_blocks_and_retains(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout')))
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='w2')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'BLOCKED'
+    assert job['block_reason'] == 'unknown_remote'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'reserved'
+
+
+def test_director_auth_failure_releases_and_blocks_auth(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(
+            vision_jobs.AuthFailure('Provider rejected the request (HTTP 401)')))
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='auth1')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'BLOCKED'
+    assert job['block_reason'] == 'auth'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'
+        attempt = db.execute(
+            'SELECT status, error_class FROM job_attempts WHERE job_id=?',
+            (queued['job_ids'][0],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        assert attempt['error_class'] == 'auth'
+
+
+def test_continuity_rate_limited_releases_and_blocks_rate_limited(
+        continuity_report, monkeypatch):
+    from studio import continuity_vision, worker
+    pid, report_id = continuity_report
+    monkeypatch.setattr(
+        continuity_vision, 'execute_pair',
+        lambda payload: (_ for _ in ()).throw(
+            vision_jobs.RateLimited('Provider rate limited the request (HTTP 429)')))
+    queued = vision_jobs.enqueue_continuity(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='rl1')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'BLOCKED'
+    assert job['block_reason'] == 'rate_limited'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'
+        attempt = db.execute(
+            'SELECT status, error_class FROM job_attempts WHERE job_id=?',
+            (queued['job_ids'][0],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        assert attempt['error_class'] == 'rate_limited'
+
+
+def test_distinct_request_ids_over_same_content_get_independent_runs(
+        director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    first = director_vision.review(pid, report_id, 'model', live=True,
+                                   budget_usd=1, per_shot_ceiling_usd=0.2,
+                                   request_id='a')
+    second = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='b')
+    assert first['run_id'] != second['run_id']
+    assert first['review_id'] != second['review_id']
+    assert set(first['job_ids']) != set(second['job_ids'])
+    # Both batches reserve and execute independently: no budget_exceeded block.
+    assert first['partial'] is False
+    assert second['partial'] is False
+    all_ids = list(first['job_ids']) + list(second['job_ids'])
+    assert all(jobs.get(jid)['status'] == 'SUCCEEDED' for jid in all_ids)
+
+
+def test_director_review_replay_returns_same_review_and_jobs(
+        director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    first = director_vision.review(pid, report_id, 'model', live=True,
+                                   budget_usd=1, per_shot_ceiling_usd=0.2,
+                                   request_id='v1')
+    second = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='v1')
+    assert second['review_id'] == first['review_id']
+    assert second['run_id'] == first['run_id']
+    assert second['job_ids'] == first['job_ids']
+    assert second['partial'] is False
+
+
+def test_frame_read_oserror_releases_reservation(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setenv('OPENAI_API_KEY', 'fake')
+    posted = []
+    monkeypatch.setattr(director_vision, '_image_payload',
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            OSError('frame unreadable')))
+    monkeypatch.setattr(director_vision, '_post',
+                        lambda *a, **k: posted.append('post') or {'choices': []})
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='w3')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'FAILED'
+    assert posted == []
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'
+
+
+def test_director_cli_partial_failure_exits_nonzero(director_report, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    pid, report_id = director_report
+    # One shot succeeds, one times out -> a partial report that must exit non-zero.
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout'))
+        if payload['seq'] == 2
+        else {**REVIEW_RESULT, 'seq': payload['seq'],
+              'source_asset_id': payload['source_asset_id']})
+    result = CliRunner().invoke(
+        app, ['director-review', pid, report_id, '--live', '--budget', '1',
+              '--per-shot-ceiling', '0.2'])
+    assert result.exit_code != 0
+    assert 'partial' in result.output.lower() or 'blocked' in result.output.lower()
+
+
+def test_director_and_continuity_reviews_share_job_truth(
+        director_report, continuity_report, monkeypatch):
+    from studio import continuity_vision
+    pid, director_report_id = director_report
+    continuity_pid, continuity_report_id = continuity_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    monkeypatch.setattr(continuity_vision, 'execute_pair',
+                        lambda payload: PAIR_RESULT)
+    director = director_vision.review(pid, director_report_id, 'm', live=True,
+                                      budget_usd=1, per_shot_ceiling_usd=0.2,
+                                      request_id='d1')
+    continuity = continuity_vision.review(continuity_pid, continuity_report_id,
+                                          'm', live=True, budget_usd=1,
+                                          per_pair_ceiling_usd=0.2,
+                                          request_id='c1')
+    assert director['review_id'] != continuity['review_id']
+    assert all(jobs.get(job_id)['kind'] == 'vision_review'
+               for job_id in director['job_ids'] + continuity['job_ids'])
+
+
+def test_continuity_api_keeps_report_shape_with_one_failed_pair(
+        api, continuity_report, monkeypatch):
+    from studio import continuity_vision
+    pid, report_id = continuity_report
+    # One pair succeeds, one blocks -> HTTP 200 with the error surfaced in results.
+    monkeypatch.setattr(
+        continuity_vision, 'execute_pair',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout'))
+        if payload['from_seq'] == 3 else PAIR_RESULT)
+    response = api.post(
+        f'/api/projects/{pid}/director/continuity-vision',
+        json={'report_id': report_id, 'model': 'm', 'live': True,
+              'budget_usd': 1, 'per_pair_ceiling_usd': 0.2,
+              'request_id': 'c3'})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert any(r['status'] == 'error' for r in data['results'])
+    assert data['review_id']
+    assert data['run_id']
+    assert data['job_ids']
+    assert data['request_id'] == 'c3'
+    assert data['partial'] is True
+    assert data['paid_api_calls'] == 2
