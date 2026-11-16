@@ -268,9 +268,11 @@ def narration_show_cmd(project_id: str):
 
 @app.command('narration-tts')
 def narration_tts_cmd(project_id: str, voice: str = 'alloy', model: str = 'gpt-4o-mini-tts',
-                      live: bool = False, max_chars: int = 1200, force: bool = False, budget: float = None):
+                      live: bool = False, max_chars: int = 1200, force: bool = False,
+                      budget: float = None,
+                      request_id: str = typer.Option(None, help='Idempotency key for the paid batch')):
     from . import narration
-    try: console.print_json(json.dumps(narration.synthesize(project_id,voice,model,live,max_chars,force,budget_usd=budget),ensure_ascii=False))
+    try: console.print_json(json.dumps(narration.synthesize(project_id,voice,model,live,max_chars,force,budget_usd=budget,request_id=request_id),ensure_ascii=False))
     except (ValueError,RuntimeError) as e: console.print(f'[red]{e}[/red]');raise typer.Exit(1)
 
 @app.command('narration-attach')
