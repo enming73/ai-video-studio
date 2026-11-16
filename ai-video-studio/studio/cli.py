@@ -323,9 +323,11 @@ def director_review_cmd(project_id: str, report_id: str,
     try:
         result=director_vision.review(project_id,report_id,model,base_url,live,budget,
                                       per_shot_ceiling,shot or None,request_id)
-        console.print_json(json.dumps(result,ensure_ascii=False))
     except (ValueError,RuntimeError) as exc:
         console.print(f'[red]{exc}[/red]'); raise typer.Exit(1)
+    console.print_json(json.dumps(result,ensure_ascii=False))
+    if result.get('partial'):
+        raise typer.Exit(1)
 
 @app.command('worker')
 def worker_cmd(owner: str = typer.Option(None, help='Stable worker owner id'),

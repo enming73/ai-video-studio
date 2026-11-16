@@ -21,6 +21,15 @@ REVIEW_RESULT = {
     'source_asset_id': 'asset-1',
 }
 
+PAIR_RESULT = {
+    'from_seq': 2, 'to_seq': 3, 'status': 'reviewed',
+    'review': {'severity': 'none', 'confidence': 0.9, 'observations': [],
+               'uncertainties': [], 'recommendation': 'keep',
+               'reason': 'continuous', 'proposed_prompt': None},
+    'usage': {'prompt_tokens': 10, 'completion_tokens': 20},
+    'source_asset_ids': ['asset-2', 'asset-3'],
+}
+
 
 @pytest.fixture(autouse=True)
 def handlers():
@@ -57,6 +66,49 @@ def director_report(tmp_path, monkeypatch):
     (root / 'report.json').write_text(
         json.dumps(report, ensure_ascii=False), encoding='utf-8')
     return pid, report_id
+
+
+@pytest.fixture
+def continuity_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('A little elephant in the forest', 10, 'mock', 10)
+    report_id = 'b2c3d4e5f6a7'
+    root = tmp_path / pid / 'continuity-reports' / report_id
+    root.mkdir(parents=True, exist_ok=True)
+    boundaries = []
+    for from_seq, to_seq in ((2, 3), (3, 4)):
+        folder = root / f'boundary-{from_seq:03d}-{to_seq:03d}'
+        folder.mkdir(parents=True, exist_ok=True)
+        frames = {'out': [], 'in': []}
+        for side in ('out', 'in'):
+            for i in (1, 2):
+                frame = folder / f'{side}-{i}.jpg'
+                frame.write_bytes(b'\xff\xd8\xff\xe0' + b'x' * 64)
+                frames[side].append({'time': 0.0, 'file': str(frame)})
+        boundaries.append({
+            'from_seq': from_seq, 'to_seq': to_seq,
+            'from_prompt': f'Shot {from_seq} prompt',
+            'to_prompt': f'Shot {to_seq} prompt',
+            'from_asset_id': f'asset-{from_seq}',
+            'to_asset_id': f'asset-{to_seq}',
+            'status': 'ready', 'warnings': [], 'frames': frames,
+        })
+    report = {'schema_version': 1, 'report_id': report_id, 'project_id': pid,
+              'created': core.now(), 'mode': 'offline_boundary_evidence',
+              'paid_api_calls': 0, 'estimated_api_cost_usd': 0, 'disclaimer': '',
+              'boundaries': boundaries}
+    (root / 'report.json').write_text(
+        json.dumps(report, ensure_ascii=False), encoding='utf-8')
+    return pid, report_id
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from studio import webapp
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    monkeypatch.setenv('STUDIO_DISABLE_EMBEDDED_WORKER', '1')
+    return TestClient(webapp.app)
 
 
 def test_director_review_creates_one_job_per_shot(director_report, monkeypatch):
@@ -181,3 +233,46 @@ def test_frame_read_oserror_releases_reservation(director_report, monkeypatch):
     with core.connect() as db:
         assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
                           (queued['job_ids'][0],)).fetchone()[0] == 'released'
+
+
+def test_director_cli_partial_failure_exits_nonzero(director_report, monkeypatch):
+    from typer.testing import CliRunner
+    from studio.cli import app
+    pid, report_id = director_report
+    # One shot succeeds, one times out -> a partial report that must exit non-zero.
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout'))
+        if payload['seq'] == 2
+        else {**REVIEW_RESULT, 'seq': payload['seq'],
+              'source_asset_id': payload['source_asset_id']})
+    result = CliRunner().invoke(
+        app, ['director-review', pid, report_id, '--live', '--budget', '1',
+              '--per-shot-ceiling', '0.2'])
+    assert result.exit_code != 0
+    assert 'partial' in result.output.lower() or 'blocked' in result.output.lower()
+
+
+def test_continuity_api_keeps_report_shape_with_one_failed_pair(
+        api, continuity_report, monkeypatch):
+    from studio import continuity_vision
+    pid, report_id = continuity_report
+    # One pair succeeds, one blocks -> HTTP 200 with the error surfaced in results.
+    monkeypatch.setattr(
+        continuity_vision, 'execute_pair',
+        lambda payload: (_ for _ in ()).throw(vision_jobs.UnknownRemote('timeout'))
+        if payload['from_seq'] == 3 else PAIR_RESULT)
+    response = api.post(
+        f'/api/projects/{pid}/director/continuity-vision',
+        json={'report_id': report_id, 'model': 'm', 'live': True,
+              'budget_usd': 1, 'per_pair_ceiling_usd': 0.2,
+              'request_id': 'c3'})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert any(r['status'] == 'error' for r in data['results'])
+    assert data['review_id']
+    assert data['run_id']
+    assert data['job_ids']
+    assert data['request_id'] == 'c3'
+    assert data['partial'] is True
+    assert data['paid_api_calls'] == 2
