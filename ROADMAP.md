@@ -1,7 +1,7 @@
 # AI Video Studio — Roadmap
 
-更新：2026-11-15
-路线图及 M0 实施已获用户确认；M0 已验收。后续阶段尚未开始实施，M1 需先形成详细设计并获批准。
+更新：2026-11-16
+路线图及 M0 实施已获用户确认；M0 已验收。M1 实施中：M1-A/B/C、M1-D1 与 M1-D2 已完成并合并，M1-E 待规划。
 
 > **一键初稿 → 按需精修 → 局部重做 → 可靠导出。**
 >
@@ -27,7 +27,7 @@
 | 声音 | 旁白、TTS、音乐、SFX、字幕、ducking | 自动编排、试听一致性、响度控制 |
 | 质量 | FFprobe/FFmpeg 分析、VLM 建议 | 与自动流程衔接的硬性质量门槛 |
 | 费用 | 多处预算参数和视频费用预留 | 全阶段统一账本、对账、完整报告 |
-| 测试 | 当次 183 + 8 + 5 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
+| 测试 | Studio 393 项、VBench 8 项通过，前端构建通过 | 当前版本完整 E2E、真实恢复与付费验收证据 |
 
 源码定位：`studio/core.py`、`guided_generation.py`、`timeline.py`、`sound.py`、`webapp.py`（均位于 `ai-video-studio/`）；共享适配器位于 `video-provider-core/src/video_provider_core/`。
 
@@ -73,7 +73,7 @@ M0 现状验收基线
 
 ## M1 — 可恢复任务、Provider 契约与统一费用
 
-**状态：实施中（M1-A/B/C 与 M1-D1 legacy Job/API 已完成并合并；M1-D2 Guided 兼容与 M1-E 其余付费入口待规划）。依赖：M0。**
+**状态：实施中（M1-A/B/C、M1-D1 legacy Job/API 与 M1-D2 Guided 付费视频 Job 已完成并合并；M1-E 其余付费入口待规划）。依赖：M0。**
 
 工作包：
 
@@ -88,7 +88,13 @@ M0 现状验收基线
 - 新增 Studio 的任务服务、账本服务和版本化迁移模块，逐步从 `core.connect()` 中移出新增迁移。
 - 接入 `core.py`、`guided_generation.py`、`guided_storyboard.py`、`guided_images.py`、`guided_boundaries.py`、`reference_generation.py`、`narration.py`、`director_vision.py`、`continuity_vision.py`、`webapp.py`、`guided_web.py`。
 
-进展：M1-A（版本化迁移与费用账本）、M1-B（Provider 契约、错误分类、能力/费用/统一接口）与 M1-C（持久化 Job、Worker、租约、恢复、暂停/取消、视频处理器试点）已完成并合并。计划见 `docs/superpowers/plans/` 下对应文件；Studio 331 项、VBench 8 项测试通过。legacy 云生成与 Job API 已接入；Guided 付费入口及其他付费阶段仍未接入，因此下列退出条件仍保持未完成。
+进展：M1-A（版本化迁移与费用账本）、M1-B（Provider 契约、错误分类、能力/费用/统一接口）、M1-C（持久化 Job、Worker、租约、恢复、暂停/取消、视频处理器试点）与 M1-D1（legacy Job/API）已完成并合并。
+
+M1-D2（Guided 付费视频 Job 与兼容投影）已完成并合并（PR #11，merge `ac67aa4`）：付费 Guided 视频提交创建持久化 Job，Mock 保留同步路径；`/attempts` 合并历史行与只读 Job 投影，不双写旧表；恢复只附加 remote 或查询下载，绝不重新提交；裁剪保留原素材与费用；未知/待下载状态可由 UI 明确确认后放弃或裁剪。React 增加活跃任务轮询、确认字段和未知任务放弃入口。
+
+D2 验证证据：Studio 393 项、VBench 8 项测试通过，前端生产构建通过；2026-11-16 使用隔离数据目录完成一次真实 MiniMax 付费烟测（Job `SUCCEEDED`、attempt `COMPLETED`、费用 `reserved 0.4 USD`、新 `guided_attempts` 行为 0、API 重启后状态/费用/素材仍可查询、重复 request ID 未重复付费）。烟测还发现并修复了当前素材匹配边界时残留 stale 标记的问题。
+
+仍未覆盖：提交后、Worker 启动前的真实重启（由自动测试覆盖）；真实 unknown remote 人工恢复；`PAUSED` 的旧状态映射；实际账单 `settled` 对账。其他付费阶段仍未接入，因此下列退出条件保持未完成。
 
 退出条件：
 
