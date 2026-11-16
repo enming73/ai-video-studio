@@ -1,11 +1,11 @@
 import struct
 import zlib
-import base64
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
 import pytest
 from fastapi.testclient import TestClient
 from studio import core, guided_characters as roles, guided_images as images, guided_workflow as workflow, webapp
+
+MODEL = 'gpt-image-2.5-sunburst'
 
 
 def png():
@@ -55,55 +55,87 @@ def test_http_upload_has_no_server_path_and_rejects_stale_revision(project):
     assert api.post(path, data={'revision': str(rev)}, files={'file': ('role.png', png(), 'image/png')}).status_code == 400
 
 
-def test_character_generation_requires_budget_and_is_idempotent(project, monkeypatch):
+def test_character_generation_requires_budget_and_is_idempotent(project):
     pid, cid, rev = project
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    calls = []
-    monkeypatch.setattr(images, '_image_request', lambda *a, **kw: calls.append(1) or {'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    assert images.preview_character(pid, cid, 'gpt-image-2.5-sunburst')['estimated_cost_usd'] is None
+    assert images.preview_character(pid, cid, MODEL)['estimated_cost_usd'] is None
     with pytest.raises(ValueError):
-        images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 0, confirm_paid=True, request_id='zero', revision=rev)
+        images.generate_character(pid, cid, MODEL, 0, confirm_paid=True, request_id='zero', revision=rev)
     with pytest.raises(ValueError):
-        images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 1, confirm_paid=False, request_id='no', revision=rev)
-    assert calls == []
-    result = images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='same', revision=rev)
-    again = images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='same', revision=rev)
-    assert result['status'] == 'COMPLETED'
+        images.generate_character(pid, cid, MODEL, 1, confirm_paid=False, request_id='no', revision=rev)
+    result = images.generate_character(pid, cid, MODEL, 1, confirm_paid=True, request_id='same', revision=rev)
+    again = images.generate_character(pid, cid, MODEL, 1, confirm_paid=True, request_id='same', revision=rev)
+    assert result['status'] == 'QUEUED'
     assert again['id'] == result['id']
-    assert len(calls) == 1
-    assert images.image_path(pid, result['image_id']).read_bytes() == png()
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM guided_image_attempts').fetchone()[0] == 0
 
 
-def test_unknown_image_submission_blocks_automatic_retry(project, monkeypatch):
+def test_character_image_double_click_reuses_job(project):
     pid, cid, rev = project
+    first = images.generate_character(pid, cid, MODEL, 1, confirm_paid=True, request_id='a', revision=rev)
+    second = images.generate_character(pid, cid, MODEL, 1, confirm_paid=True, request_id='b', revision=rev)
+    assert first['id'] == second['id']
+    assert first['status'] == 'QUEUED'
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM guided_image_attempts').fetchone()[0] == 0
+
+
+def test_image_timeout_blocks_unknown_without_resubmit(tmp_path, monkeypatch):
+    from studio import guided_compat, image_jobs, jobs, request_jobs, worker
+    from studio.handlers import register_all
+    register_all()
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('An elephant in a forest', 10, 'mock', 5)
+    workflow.create(pid, character_stage_enabled=True)
+    state = roles.save_character(pid, None, 'Luma', 'Small gray elephant', 0)
+    character_id, revision = state['characters'][0]['id'], state['revision']
+    images.generate_character(pid, character_id, MODEL, 1, confirm_paid=True, request_id='a', revision=revision)
+    job = request_jobs.find(pid, kind='image', request_id='a')
     monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    def failed(*args, **kwargs): raise OSError('unknown network outcome')
-    monkeypatch.setattr(images, '_image_request', failed)
-    result = images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='a', revision=rev)
-    assert result['status'] == 'UNKNOWN'
+    monkeypatch.setattr(image_jobs, '_request_image',
+                        lambda *a, **k: (_ for _ in ()).throw(TimeoutError('timeout')))
+    assert worker.run_once() == job['id']
+    assert jobs.get(job['id'])['block_reason'] == 'unknown_remote'
+    assert guided_compat.find_image(pid, job['id'])['status'] == 'UNKNOWN'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (job['id'],)).fetchone()[0] == 'reserved'
     with pytest.raises(ValueError, match='unresolved'):
-        images.generate_character(pid, cid, 'gpt-image-2.5-sunburst', 1, confirm_paid=True, request_id='b', revision=rev)
+        image_jobs.enqueue_character(pid, character_id, MODEL, 1, confirm_paid=True,
+                                     request_id='retry', revision=revision)
 
 
-def test_concurrent_duplicate_image_request_makes_one_submission(project, monkeypatch):
+def test_concurrent_duplicate_image_request_makes_one_submission(project):
     pid, cid, rev = project
-    monkeypatch.setenv('STUDIO_IMAGE_API_KEY', 'fake')
-    entered, release, calls = Event(), Event(), []
-    def image_request(*args, **kwargs):
-        calls.append(1); entered.set()
-        assert release.wait(5)
-        return {'data': [{'b64_json': base64.b64encode(png()).decode()}]}
-    monkeypatch.setattr(images, '_image_request', image_request)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(images.generate_character, pid, cid, 'gpt-image-2.5-sunburst', 1,
+        first = pool.submit(images.generate_character, pid, cid, MODEL, 1,
                             confirm_paid=True, request_id='same', revision=rev)
-        assert entered.wait(5)
-        duplicate = pool.submit(images.generate_character, pid, cid, 'gpt-image-2.5-sunburst', 1,
-                                confirm_paid=True, request_id='same', revision=rev).result(timeout=5)
-        assert duplicate['status'] == 'SUBMITTING'
-        release.set()
-        assert first.result(timeout=10)['status'] == 'COMPLETED'
-    assert len(calls) == 1
+        second = pool.submit(images.generate_character, pid, cid, MODEL, 1,
+                             confirm_paid=True, request_id='same', revision=rev)
+        a, b = first.result(timeout=10), second.result(timeout=10)
+    assert a['id'] == b['id']
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM guided_image_attempts').fetchone()[0] == 0
+
+
+def test_image_attempts_merge_legacy_and_jobs(project):
+    from studio import guided_compat
+    pid, cid, rev = project
+    images.generate_character(pid, cid, MODEL, 1, confirm_paid=True, request_id='new', revision=rev)
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_image_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   ('legacy1', pid, cid, 'character', 'old', MODEL, 1, 'UNKNOWN', '{}', None, 'legacy failure'))
+    rows = guided_compat.image_attempt_records(pid)
+    assert rows[0]['request_id'] == 'new'
+    assert rows[0]['status'] == 'QUEUED'
+    assert rows[1]['id'] == 'legacy1'
+    assert set(rows[0]) == {'id', 'target_id', 'kind', 'request_id', 'model', 'budget',
+                            'status', 'image_id', 'error'}
+    assert guided_compat.find_image(pid, 'legacy1')['request_id'] == 'old'
+    assert guided_compat.find_image(pid, rows[0]['id'])['request_id'] == 'new'
 
 
 def test_selecting_video_from_current_boundaries_resolves_old_video_decision(tmp_path, monkeypatch):

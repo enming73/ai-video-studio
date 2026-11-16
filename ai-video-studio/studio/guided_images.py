@@ -1,6 +1,5 @@
 """Project-scoped immutable image uploads and generated versions."""
 import hashlib
-import base64
 import json
 import os
 import shutil
@@ -8,8 +7,6 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 from . import core, guided_characters, guided_workflow
-import httpx
-from dotenv import load_dotenv
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _FORMATS = {'.png': b'\x89PNG\r\n\x1a\n', '.jpg': b'\xff\xd8\xff', '.jpeg': b'\xff\xd8\xff', '.webp': b'RIFF'}
@@ -211,13 +208,6 @@ def preview_character(pid: str, character_id: str, model: str) -> dict:
             'estimated_cost_usd': None, 'note': 'Budget is not a provider-enforced spending cap.'}
 
 
-def _image_request(url, key, payload):
-    with httpx.Client(timeout=180, follow_redirects=False) as client:
-        response = client.post(url, headers={'Authorization': 'Bearer ' + key}, json=payload)
-        response.raise_for_status()
-        return response.json()
-
-
 def image_attempt(pid: str, attempt_id: str) -> dict:
     with core.connect() as db:
         guided_characters._enabled(db, pid)
@@ -227,58 +217,10 @@ def image_attempt(pid: str, attempt_id: str) -> dict:
 
 
 def generate_character(pid: str, character_id: str, model: str, budget_usd: float, *, confirm_paid: bool, request_id: str, revision: int) -> dict:
-    details = preview_character(pid, character_id, model)
-    core.require_paid_budget(budget_usd)
-    if confirm_paid is not True or not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
-        raise ValueError('Explicit confirmation and request ID required')
-    load_dotenv()
-    key = os.getenv('STUDIO_IMAGE_API_KEY') or os.getenv('OPENAI_API_KEY')
-    base = os.getenv('STUDIO_IMAGE_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
-    if not key or not base.startswith('https://'):
-        raise ValueError('Image API key and HTTPS endpoint required')
-    aid = uuid4().hex
-    with core.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        existing = db.execute('SELECT * FROM guided_image_attempts WHERE project_id=? AND request_id=?', (pid, request_id)).fetchone()
-        if existing:
-            if existing['target_id'] != character_id or existing['kind'] != 'character':
-                raise ValueError('Request ID belongs to another image operation')
-            return {k: existing[k] for k in ('id','target_id','kind','request_id','model','budget','status','image_id','error')}
-        guided_workflow._revision(guided_workflow._row(db, pid), revision)
-        if db.execute("SELECT 1 FROM guided_image_attempts WHERE project_id=? AND target_id=? AND kind='character' AND status IN ('SUBMITTING','UNKNOWN')", (pid, character_id)).fetchone():
-            raise ValueError('Previous image submission is unresolved')
-        role = db.execute('SELECT name,description FROM guided_characters WHERE project_id=? AND id=?', (pid, character_id)).fetchone()
-        if not role or f"Character reference portrait for {role['name']}. {role['description']}. One character, no text." != details['prompt']:
-            raise ValueError('Character changed after preview')
-        db.execute('INSERT INTO guided_image_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                   (aid, pid, character_id, 'character', request_id, model, budget_usd, 'SUBMITTING', json.dumps(details), None, None))
-    try:
-        data = _image_request(base + '/images/generations', key, {'model': model, 'prompt': details['prompt'], 'output_format': 'png'})
-        raw = base64.b64decode(data['data'][0]['b64_json'], validate=True)
-        if not raw.startswith(_FORMATS['.png']) or len(raw) > MAX_IMAGE_BYTES:
-            raise ValueError('Provider returned an invalid image')
-        image_id = uuid4().hex
-        target = _safe_path(pid, image_id, '.png')
-        with target.open('xb') as f: f.write(raw)
-        result = subprocess.run(['ffmpeg','-v','error','-xerror','-i',str(target),'-frames:v','1','-f','null','-'],capture_output=True,timeout=15)
-        if result.returncode: raise ValueError('Provider returned an invalid image')
-        with core.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            db.execute('INSERT INTO guided_character_images VALUES (?,?,?,?,?,?,?)',
-                       (image_id, pid, character_id, str(target), hashlib.sha256(raw).hexdigest(), 'generated', core.now()))
-            db.execute("UPDATE guided_image_attempts SET status='COMPLETED',image_id=? WHERE project_id=? AND id=?", (image_id, pid, aid))
-            guided_characters._changed(db, pid)
-    except Exception:
-        with core.connect() as db:
-            db.execute("UPDATE guided_image_attempts SET status='UNKNOWN',error=? WHERE project_id=? AND id=?", ('Image request failed or outcome unknown; check provider charges.', pid, aid))
-    return image_attempt(pid, aid)
-
-
-def _image_edit(url, key, payload, files):
-    with httpx.Client(timeout=180, follow_redirects=False) as client:
-        response = client.post(url, headers={'Authorization': 'Bearer ' + key}, data=payload, files=files)
-        response.raise_for_status()
-        return response.json()
+    from . import image_jobs
+    return image_jobs.enqueue_character(pid, character_id, model, budget_usd,
+                                        confirm_paid=confirm_paid, request_id=request_id,
+                                        revision=revision)
 
 
 def resolve_attempt(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict:
@@ -286,5 +228,30 @@ def resolve_attempt(pid: str, attempt_id: str, *, confirm_checked: bool) -> dict
     with core.connect() as db:
         guided_characters._enabled(db, pid)
         result = db.execute("UPDATE guided_image_attempts SET status='ACKNOWLEDGED' WHERE project_id=? AND id=? AND status IN ('SUBMITTING','UNKNOWN')", (pid, attempt_id))
-        if result.rowcount != 1: raise ValueError('No unresolved image attempt')
-    return image_attempt(pid, attempt_id)
+        if result.rowcount == 1:
+            return image_attempt(pid, attempt_id)
+    from . import attempts as attempt_store, guided_compat, guided_workflow, jobs
+    with core.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        guided_workflow._row(db, pid)
+        job = guided_compat.find_image_job(pid, attempt_id, db=db)
+        if job is None:
+            raise ValueError('No unresolved image attempt')
+        _require_idle(job)
+        current = jobs.latest_attempt(job['id'], db=db)
+        if not current or current['status'] not in ('UNKNOWN_REMOTE_STATE', 'SUBMITTING'):
+            raise ValueError('Only an unknown image attempt can be resolved')
+        attempt_store.abandon(current['id'], 'User checked; remote may continue and bill', db=db)
+        db.execute("UPDATE jobs SET status='CANCELLED',cancel_requested=1,lease_owner=NULL,"
+                   "lease_expires=NULL,updated=? WHERE id=?", (core.now(), job['id']))
+        jobs.append_event(job['id'], 'guided_abandoned',
+                          {'warning': 'remote may continue and bill'}, attempt_id=current['id'], db=db)
+        return guided_compat.project_image_job(jobs.get(job['id'], db=db), db=db)
+
+
+def _require_idle(job):
+    from datetime import datetime, timezone
+    if (job['status'] == 'RUNNING' and job['lease_owner'] and job['lease_expires']
+            and datetime.fromisoformat(job['lease_expires']).replace(tzinfo=timezone.utc)
+            > datetime.now(timezone.utc)):
+        raise ValueError('An active worker owns this job; query it later')

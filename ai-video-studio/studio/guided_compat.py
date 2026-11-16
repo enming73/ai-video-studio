@@ -207,6 +207,108 @@ def find_plan(pid: str, request_id: str, db=None) -> dict:
         raise ValueError('Unknown planning attempt')
 
 
+def _image_status(job: dict, attempt: dict | None) -> tuple[str, str | None]:
+    """Map an image Job to the legacy image-attempt status/error pair."""
+    job_status = job['status']
+    detail = job['error_detail'] or job['block_reason']
+    if job_status in ('PENDING', 'RUNNING'):
+        if attempt is None:
+            return 'QUEUED', None
+        a = attempt['status']
+        if a in ('PLANNED', 'RESERVED'):
+            return 'QUEUED', None
+        if a == 'SUBMITTING':
+            return 'SUBMITTING', None
+        if a == 'COMPLETED':
+            return 'COMPLETED', None
+        if a == 'UNKNOWN_REMOTE_STATE':
+            return 'UNKNOWN', attempt.get('error_detail') or detail
+        if a in ('FAILED_FINAL', 'FAILED_RETRYABLE'):
+            return 'FAILED', attempt.get('error_detail') or detail
+        if a == 'ABANDONED':
+            return 'ACKNOWLEDGED', None
+        raise ValueError(f'Unsupported image attempt status: {a}')
+    if job_status == 'SUCCEEDED':
+        return 'COMPLETED', None
+    if job_status == 'BLOCKED':
+        if job['block_reason'] == 'unknown_remote':
+            return 'UNKNOWN', detail
+        return 'FAILED', detail
+    if job_status == 'FAILED':
+        return 'FAILED', detail
+    if job_status == 'CANCELLED':
+        return 'ACKNOWLEDGED', None
+    raise ValueError(f'Unsupported image job status: {job_status}')
+
+
+def project_image_job(job: dict, *, db=None) -> dict:
+    """Project an image Job into the legacy image-attempt shape."""
+    if job.get('kind') != 'image':
+        raise ValueError('Unsupported image job kind')
+    payload = json.loads(job['payload_json'])
+    with job_runner._conn(db) as conn:
+        attempt = jobs.latest_attempt(job['id'], db=conn)
+        output = json.loads((attempt or {}).get('output_json') or '{}')
+        output.update(json.loads(job['output_json'] or '{}'))
+    status, error = _image_status(job, attempt)
+    return {
+        'id': attempt['id'] if attempt else job['id'],
+        'target_id': payload['target_id'],
+        'kind': payload['target'],
+        'request_id': payload['request_id'],
+        'model': payload['model'],
+        'budget': payload['budget_usd'],
+        'status': status,
+        'image_id': output.get('image_id'),
+        'error': error,
+    }
+
+
+def _image_jobs(conn, pid):
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM jobs WHERE project_id=? AND kind='image' ORDER BY created DESC", (pid,))]
+
+
+_IMAGE_FIELDS = ('id', 'target_id', 'kind', 'request_id', 'model', 'budget',
+                 'status', 'image_id', 'error')
+
+
+def image_attempt_records(pid: str, db=None) -> list[dict]:
+    """Image Job projections newest-first, then legacy rows, deduped by id."""
+    with job_runner._conn(db) as conn:
+        guided_workflow._row(conn, pid)
+        jobs_rows = _image_jobs(conn, pid)
+        legacy = [{k: row[k] for k in _IMAGE_FIELDS} for row in conn.execute(
+            'SELECT * FROM guided_image_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    records = [project_image_job(job) for job in jobs_rows] + legacy
+    unique = {}
+    for row in records:
+        unique.setdefault(row['id'], row)
+    return list(unique.values())
+
+
+def find_image_job(pid: str, attempt_id: str, db=None) -> dict | None:
+    with job_runner._conn(db) as conn:
+        row = conn.execute(
+            "SELECT j.* FROM jobs j WHERE j.project_id=? AND j.kind='image' "
+            'AND (j.id=? OR EXISTS (SELECT 1 FROM job_attempts a WHERE a.job_id=j.id AND a.id=?))',
+            (pid, attempt_id, attempt_id)).fetchone()
+        return dict(row) if row else None
+
+
+def find_image(pid: str, attempt_id: str, db=None) -> dict:
+    """Legacy image row first; otherwise the image Job projection."""
+    with job_runner._conn(db) as conn:
+        row = conn.execute('SELECT * FROM guided_image_attempts WHERE project_id=? AND id=?',
+                           (pid, attempt_id)).fetchone()
+        if row:
+            return {k: row[k] for k in _IMAGE_FIELDS}
+        job = find_image_job(pid, attempt_id, db=conn)
+        if job:
+            return project_image_job(job, db=conn)
+        raise ValueError('Unknown image attempt')
+
+
 def asset_provenance(db, pid, shot_id, asset_id):
     """Boundary snapshot for an asset registered from a Guided Job."""
     row = db.execute(

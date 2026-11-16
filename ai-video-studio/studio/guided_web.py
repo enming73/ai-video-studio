@@ -267,8 +267,7 @@ def structure(pid: str, body: Structure):
 @router.get('/image-attempts')
 def image_attempts(pid: str):
     call(guided_characters.get, pid)
-    with core.connect() as db:
-        return [dict(r) for r in db.execute('SELECT id,target_id,kind,request_id,model,budget,status,image_id,error FROM guided_image_attempts WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    return call(guided_compat.image_attempt_records, pid)
 
 
 @router.post('/image-attempts/{attempt_id}/resolve')

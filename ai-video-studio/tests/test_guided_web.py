@@ -134,6 +134,45 @@ def test_plan_resolve_legacy_row_requires_confirmation(api):
     assert resolved.json()['status'] == 'ACKNOWLEDGED'
 
 
+def test_image_attempts_projects_jobs_and_resolves(api):
+    import json
+    from studio import attempts, jobs, request_jobs
+    response = api.post('/api/production/projects', json={'prompt': 'Elephant', 'duration': 20,
+                                                          'provider': 'mock', 'budget': 2, 'guided': True})
+    pid = response.json()['project_id']
+    base = f'/api/projects/{pid}/guided'
+    result = api.post(base + '/characters', json={'name': 'Luma', 'description': 'A gray elephant', 'revision': 0})
+    assert result.status_code == 200, result.text
+    character_id = result.json()['characters'][0]['id']
+    revision = result.json()['revision']
+    enqueued = api.post(base + f'/characters/{character_id}/images/generate', json={
+        'model': 'gpt-image-2.5-sunburst', 'budget_usd': 1, 'confirm_paid': True,
+        'request_id': 'img-1', 'revision': revision})
+    assert enqueued.status_code == 200, enqueued.text
+    assert enqueued.json()['status'] == 'QUEUED'
+    listed = api.get(base + '/image-attempts').json()
+    assert any(x['request_id'] == 'img-1' and x['status'] == 'QUEUED' for x in listed)
+    job = request_jobs.find(pid, kind='image', request_id='img-1')
+    attempt = attempts.create(job['id'], provider='image', model='gpt-image-2.5-sunburst',
+                              input_data=json.loads(job['payload_json']))
+    attempts.prepare_submission(attempt['id'], amount_microusd=1_000_000, pricing_version='test:v1')
+    attempts.mark_unknown(attempt['id'], 'uncertain submission')
+    with core.connect() as db:
+        db.execute("UPDATE jobs SET status='BLOCKED',block_reason='unknown_remote' WHERE id=?", (job['id'],))
+    listed = api.get(base + '/image-attempts').json()
+    assert any(x['request_id'] == 'img-1' and x['status'] == 'UNKNOWN' for x in listed)
+    rejected = api.post(base + f'/image-attempts/{job["id"]}/resolve', json={})
+    assert rejected.status_code == 400
+    assert 'confirm' in rejected.json()['detail'].lower()
+    resolved = api.post(base + f'/image-attempts/{job["id"]}/resolve', json={'confirm_checked': True})
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()['status'] == 'ACKNOWLEDGED'
+    with core.connect() as db:
+        assert jobs.get(job['id'], db=db)['status'] == 'CANCELLED'
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE attempt_id=?',
+                          (attempt['id'],)).fetchone()[0] == 'reserved'
+
+
 @pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg/ffprobe required')
 def test_guided_mock_end_to_end_with_real_ffmpeg(api):
     response = api.post('/api/production/projects', json={'prompt': 'Two scenes', 'duration': 2,
