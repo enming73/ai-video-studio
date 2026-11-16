@@ -234,6 +234,29 @@ def test_storyboard_invalid_response_marks_failed_final_and_reserves(guided_stor
         assert entry['billing_status'] == 'reserved'
 
 
+def test_storyboard_network_timeout_blocks_unknown(guided_storyboard_job, monkeypatch):
+    import httpx
+    from studio.handlers import register_all
+    register_all()
+    pid = guided_storyboard_job['project_id']
+    monkeypatch.setenv('STUDIO_LLM_API_KEY', 'fake')
+    monkeypatch.setattr(core, '_llm_json',
+                        lambda *a: (_ for _ in ()).throw(httpx.ReadTimeout('timeout')))
+    assert worker.run_once() == guided_storyboard_job['id']
+    blocked = jobs.get(guided_storyboard_job['id'])
+    assert blocked['status'] == 'BLOCKED'
+    assert blocked['block_reason'] == 'unknown_remote'
+    with core.connect() as db:
+        attempt = db.execute('SELECT status FROM job_attempts WHERE job_id=?',
+                             (guided_storyboard_job['id'],)).fetchone()
+        assert attempt['status'] == 'UNKNOWN_REMOTE_STATE'
+        entry = db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                           (guided_storyboard_job['id'],)).fetchone()
+        assert entry['billing_status'] == 'reserved'
+    with pytest.raises(ValueError, match='unresolved'):
+        gs.request_plan(pid, 'test-model', 1, confirm_paid=True, request_id='retry', revision=0)
+
+
 def test_resolve_plan_requires_confirmation_and_acknowledges(guided_storyboard_job):
     from studio import attempts
     job = guided_storyboard_job

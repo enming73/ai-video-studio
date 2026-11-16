@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from .. import ledger
+from .. import jobs, ledger
 from .. import guided_storyboard, guided_workflow
 
 
@@ -25,10 +25,16 @@ def execute(job, attempts, control):
     try:
         draft = guided_storyboard.generate_draft(payload)
         guided_workflow.save_draft(pid, draft, payload['revision'])
+    except guided_storyboard.UnknownRemote as exc:
+        # The request may have been sent; retain the reservation and block.
+        attempts.mark_unknown(attempt['id'], str(exc))
+        jobs.append_event(job['id'], 'storyboard_unknown', {'error': str(exc)[:500]},
+                          attempt_id=attempt['id'])
+        control.block('unknown_remote')
     except Exception as exc:
-        # Any post-reservation failure is permanent: the request may already be
-        # billed, so the reservation is retained and this must never fall
-        # through to the worker's conservative unknown_remote path.
+        # A known/validation failure (or stale revision) is permanent: the
+        # request may already be billed, so the reservation is retained and
+        # this must never fall through to the worker's unknown_remote path.
         attempts.mark_failed(attempt['id'], 'FAILED_FINAL', str(exc))
         raise
     attempts.mark_completed(attempt['id'], {'result': draft})

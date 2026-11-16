@@ -5,12 +5,28 @@ import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import httpx
 from dotenv import load_dotenv
 
 from . import core, provider_capabilities
 
 _MODELS = {'mock': 'mock', 'minimax': 'MiniMax-H3', 'wan': 'wan3.0-video',
            'flux': 'blackforestlabs/flux-3-max/text-to-video'}
+
+
+class UnknownRemote(Exception):
+    """The LLM request may have been sent but its outcome is unknown."""
+
+
+_UNKNOWN_ERRORS = (httpx.HTTPError, OSError, json.JSONDecodeError, KeyError, IndexError, TypeError)
+
+
+def _request_unknown(fn, *args, **kwargs):
+    """Run the LLM call, mapping transport/parse ambiguities to UnknownRemote."""
+    try:
+        return fn(*args, **kwargs)
+    except _UNKNOWN_ERRORS as exc:
+        raise UnknownRemote(str(exc)) from exc
 
 
 def preview(pid: str, model: str, shot_length: int | None = None) -> dict:
@@ -67,9 +83,8 @@ def generate_draft(payload: dict) -> dict:
     if payload.get('character_stage'):
         system += (' Every shot must include character_names as an array of exact character bible names, '
                    'or [] for no characters.')
-    result = core._llm_json(
-        system,
-        json.dumps(prompt, ensure_ascii=False), payload['model'],
+    result = _request_unknown(
+        core._llm_json, system, json.dumps(prompt, ensure_ascii=False), payload['model'],
         payload.get('base_url') or os.getenv('STUDIO_LLM_BASE_URL', 'https://api.openai.com/v1'))
     if not isinstance(result, dict) or not isinstance(result.get('character_bible'), dict):
         raise ValueError('Invalid character bible')
@@ -138,7 +153,13 @@ def request_plan(pid: str, model: str, budget_usd: float, *, confirm_paid: bool,
     from . import guided_compat, request_jobs
     job = request_jobs.submit(pid, kind='llm_storyboard', request_id=request_id,
                               payload=payload, budget_usd=budget_usd, target_key='storyboard')
-    return guided_compat.project_plan_job(job)
+    return _reject_unresolved(guided_compat.project_plan_job(job))
+
+
+def _reject_unresolved(projected: dict) -> dict:
+    if projected['status'] == 'UNKNOWN':
+        raise ValueError('Previous planning submission is unresolved')
+    return projected
 
 
 def _require_idle(job):
