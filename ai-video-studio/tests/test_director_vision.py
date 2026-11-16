@@ -64,6 +64,40 @@ def test_execute_shot_unknown_remote(tmp_path, monkeypatch):
         v.execute_shot(payload)
 
 
+def _status_client(status):
+    def client_factory(*args, **kwargs):
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                request = httpx.Request('POST', 'https://api.example.com/v1')
+                return httpx.Response(status, request=request)
+        return _Client()
+    return client_factory
+
+
+def test_post_classifies_http_status_errors(monkeypatch):
+    for status, exc_type in ((401, vision_jobs.AuthFailure),
+                             (403, vision_jobs.AuthFailure),
+                             (429, vision_jobs.RateLimited),
+                             (400, vision_jobs.PreRequestFailure),
+                             (404, vision_jobs.PreRequestFailure)):
+        monkeypatch.setattr(v.httpx, 'Client', _status_client(status))
+        with pytest.raises(exc_type):
+            v._post('https://api.example.com/v1', 'k', 'm', [])
+    # 5xx stays ambiguous and is re-raised for the executor's unknown handling.
+    monkeypatch.setattr(v.httpx, 'Client', _status_client(500))
+    with pytest.raises(httpx.HTTPStatusError):
+        v._post('https://api.example.com/v1', 'k', 'm', [])
+
+
 def test_execute_shot_post_response_failure(tmp_path, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'fake')
     payload = _shot_payload(tmp_path, monkeypatch)

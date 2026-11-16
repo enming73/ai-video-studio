@@ -79,7 +79,20 @@ def _post(endpoint, key, model, content):
                   'messages': [{'role': 'system', 'content': SYSTEM},
                                {'role': 'user', 'content': content}],
                   'temperature': 0, 'max_tokens': 1100})
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (401, 403):
+                raise vision_jobs.AuthFailure(
+                    f'Provider rejected the request (HTTP {status})') from exc
+            if status == 429:
+                raise vision_jobs.RateLimited(
+                    'Provider rate limited the request (HTTP 429)') from exc
+            if 400 <= status < 500:
+                raise vision_jobs.PreRequestFailure(
+                    f'Provider rejected the request (HTTP {status})') from exc
+            raise
         return response.json()
 
 

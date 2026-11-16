@@ -23,6 +23,14 @@ class UnknownRemote(Exception):
     """The provider request may have been sent but its outcome is unknown."""
 
 
+class AuthFailure(Exception):
+    """The provider rejected the request as unauthorized (401/403)."""
+
+
+class RateLimited(Exception):
+    """The provider rejected the request as rate limited (429)."""
+
+
 class PreRequestFailure(Exception):
     """A deterministic failure proven to occur before any provider request."""
 

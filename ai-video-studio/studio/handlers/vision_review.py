@@ -36,6 +36,23 @@ def execute(job, attempts, control):
         jobs.append_event(job['id'], 'vision_unknown', {'error': str(exc)[:500]},
                           attempt_id=attempt['id'])
         control.block('unknown_remote')
+    except vision_jobs.AuthFailure as exc:
+        # 401/403: definitively rejected, never billed. Release and block auth.
+        ledger.release(entry, evidence=f'vision auth rejected: {str(exc)[:200]}')
+        attempts.mark_failed(attempt['id'], 'FAILED_FINAL', str(exc),
+                             error_class='auth')
+        jobs.append_event(job['id'], 'vision_auth', {'error': str(exc)[:500]},
+                          attempt_id=attempt['id'])
+        control.block('auth')
+    except vision_jobs.RateLimited as exc:
+        # 429: definitively not accepted, never billed. Release and block rate
+        # limited so a replay is distinguishable from an unknown outcome.
+        ledger.release(entry, evidence=f'vision rate limited: {str(exc)[:200]}')
+        attempts.mark_failed(attempt['id'], 'FAILED_FINAL', str(exc),
+                             error_class='rate_limited')
+        jobs.append_event(job['id'], 'vision_rate_limited',
+                          {'error': str(exc)[:500]}, attempt_id=attempt['id'])
+        control.block('rate_limited')
     except vision_jobs.PreRequestFailure as exc:
         # Proven no provider call: the reservation was never billed, release it.
         ledger.release(entry, evidence=f'vision not sent: {str(exc)[:200]}')

@@ -137,6 +137,18 @@ def test_no_jobs_when_total_ceiling_exceeds_budget(director_report):
                           ).fetchone()[0] == 0
 
 
+def test_no_jobs_when_pair_ceiling_exceeds_budget(continuity_report):
+    from studio import continuity_vision
+    pid, report_id = continuity_report
+    with pytest.raises(ValueError, match='Budget insufficient'):
+        continuity_vision.review(pid, report_id, 'model', live=True,
+                                 budget_usd=0.1, per_pair_ceiling_usd=0.2,
+                                 request_id='c1')
+    with core.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE kind='vision_review'"
+                          ).fetchone()[0] == 0
+
+
 def test_director_review_marks_partial_failure(director_report, monkeypatch):
     pid, report_id = director_report
     monkeypatch.setattr(
@@ -191,6 +203,53 @@ def test_vision_unknown_remote_blocks_and_retains(director_report, monkeypatch):
                           (queued['job_ids'][0],)).fetchone()[0] == 'reserved'
 
 
+def test_director_auth_failure_releases_and_blocks_auth(director_report, monkeypatch):
+    from studio import worker
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: (_ for _ in ()).throw(
+            vision_jobs.AuthFailure('Provider rejected the request (HTTP 401)')))
+    queued = vision_jobs.enqueue_director(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='auth1')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'BLOCKED'
+    assert job['block_reason'] == 'auth'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'
+        attempt = db.execute(
+            'SELECT status, error_class FROM job_attempts WHERE job_id=?',
+            (queued['job_ids'][0],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        assert attempt['error_class'] == 'auth'
+
+
+def test_continuity_rate_limited_releases_and_blocks_rate_limited(
+        continuity_report, monkeypatch):
+    from studio import continuity_vision, worker
+    pid, report_id = continuity_report
+    monkeypatch.setattr(
+        continuity_vision, 'execute_pair',
+        lambda payload: (_ for _ in ()).throw(
+            vision_jobs.RateLimited('Provider rate limited the request (HTTP 429)')))
+    queued = vision_jobs.enqueue_continuity(
+        pid, report_id, 'model', None, 1, 0.2, None, request_id='rl1')
+    worker.run_once()
+    job = jobs.get(queued['job_ids'][0])
+    assert job['status'] == 'BLOCKED'
+    assert job['block_reason'] == 'rate_limited'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (queued['job_ids'][0],)).fetchone()[0] == 'released'
+        attempt = db.execute(
+            'SELECT status, error_class FROM job_attempts WHERE job_id=?',
+            (queued['job_ids'][0],)).fetchone()
+        assert attempt['status'] == 'FAILED_FINAL'
+        assert attempt['error_class'] == 'rate_limited'
+
+
 def test_distinct_request_ids_over_same_content_get_independent_runs(
         director_report, monkeypatch):
     pid, report_id = director_report
@@ -212,6 +271,25 @@ def test_distinct_request_ids_over_same_content_get_independent_runs(
     assert second['partial'] is False
     all_ids = list(first['job_ids']) + list(second['job_ids'])
     assert all(jobs.get(jid)['status'] == 'SUCCEEDED' for jid in all_ids)
+
+
+def test_director_review_replay_returns_same_review_and_jobs(
+        director_report, monkeypatch):
+    pid, report_id = director_report
+    monkeypatch.setattr(
+        director_vision, 'execute_shot',
+        lambda payload: {**REVIEW_RESULT, 'seq': payload['seq'],
+                         'source_asset_id': payload['source_asset_id']})
+    first = director_vision.review(pid, report_id, 'model', live=True,
+                                   budget_usd=1, per_shot_ceiling_usd=0.2,
+                                   request_id='v1')
+    second = director_vision.review(pid, report_id, 'model', live=True,
+                                    budget_usd=1, per_shot_ceiling_usd=0.2,
+                                    request_id='v1')
+    assert second['review_id'] == first['review_id']
+    assert second['run_id'] == first['run_id']
+    assert second['job_ids'] == first['job_ids']
+    assert second['partial'] is False
 
 
 def test_frame_read_oserror_releases_reservation(director_report, monkeypatch):
