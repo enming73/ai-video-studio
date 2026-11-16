@@ -51,6 +51,8 @@ def generate_frame(pid, seq, *, live=False, model=DEFAULT_IMAGE_MODEL, force=Fal
     if live: core.require_paid_budget(budget_usd)
     plan = frame_plan(pid,seq,model)
     if not live: return {'dry_run':True, **plan}
+    if force and request_id is None:
+        raise ValueError('--request-id is required with --force (a new version needs a new id)')
     if request_id is None:
         # Stable id from project, shot and prompt/model/reference digest so a
         # repeated identical live command is idempotent. --force alone does not

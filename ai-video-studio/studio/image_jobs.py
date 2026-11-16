@@ -119,8 +119,11 @@ def execute_boundary(payload: dict) -> dict:
     prompt = payload['prompt']
     references = []
     for ref in payload['references']:
-        path = guided_images.image_path(pid, ref['image_id'])
-        raw = path.read_bytes()
+        try:
+            path = guided_images.image_path(pid, ref['image_id'])
+            raw = path.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise PreRequestFailure('Reference image missing or unavailable') from exc
         if hashlib.sha256(raw).hexdigest() != ref['sha256']:
             raise PreRequestFailure('Reference image changed')
         references.append((ref, path, raw))
@@ -178,7 +181,10 @@ def execute_reference(payload: dict) -> dict:
     prepared = []
     for ref in payload['references']:
         path = Path(ref['file'])
-        raw = path.read_bytes()
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise PreRequestFailure('Reference image missing or unreadable') from exc
         if hashlib.sha256(raw).hexdigest() != ref['sha256']:
             raise PreRequestFailure('Reference image changed')
         prepared.append((path, raw))

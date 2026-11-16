@@ -8,6 +8,7 @@ request never leaves the process.
 """
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -112,3 +113,36 @@ def test_reference_unknown_remote_blocks_and_retains(reference_job, monkeypatch)
     with core.connect() as db:
         assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
                           (reference_job['job_id'],)).fetchone()[0] == 'reserved'
+
+
+def test_reference_force_requires_explicit_request_id(reference_project, monkeypatch):
+    with pytest.raises(ValueError, match='--request-id'):
+        rg.generate_frame(reference_project, 1, live=True, budget_usd=1, force=True)
+    with core.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM cost_entries').fetchone()[0] == 0
+    # With an explicit request id, --force mints a new Job rather than replaying.
+    monkeypatch.setattr(image_jobs, '_request_edit', lambda *a, **k: PNG)
+    first = rg.generate_frame(reference_project, 1, live=True, budget_usd=1,
+                              request_id='v1')
+    second = rg.generate_frame(reference_project, 1, live=True, budget_usd=1,
+                               request_id='v2', force=True)
+    assert second['job_id'] != first['job_id']
+
+
+def test_reference_missing_file_releases_reservation(reference_job, monkeypatch):
+    pid = reference_job['pid']
+    called = []
+    monkeypatch.setattr(image_jobs, '_request_edit',
+                        lambda *a, **k: called.append(True) or PNG)
+    with core.connect() as db:
+        payload = json.loads(db.execute(
+            'SELECT payload_json FROM jobs WHERE id=?',
+            (reference_job['job_id'],)).fetchone()[0])
+    Path(payload['references'][0]['file']).unlink()
+    assert worker.run_once() == reference_job['job_id']
+    assert jobs.get(reference_job['job_id'])['status'] == 'FAILED'
+    with core.connect() as db:
+        assert db.execute('SELECT billing_status FROM cost_entries WHERE job_id=?',
+                          (reference_job['job_id'],)).fetchone()[0] == 'released'
+    assert called == []
