@@ -143,3 +143,40 @@ def test_timeline_render_selected_returns_snapshot_output(snapshot_project):
     core.verify_video(out, 6)
     with pytest.raises(ValueError):
         timeline.render(pid, output=out, source='selected')
+
+
+def test_local_render_resume_is_idempotent(snapshot_project):
+    """A re-run after record_history (before SUCCEEDED) must not flip to FAILED."""
+    from studio import attempts as attempts_store, jobs, worker
+    from studio.handlers import local_render
+    pid, _rev, _srt = snapshot_project
+    snap = render_snapshots.create(pid)
+    done = render_snapshots.run_and_wait(pid, snap['id'])
+    assert done['status'] == 'READY'
+
+    job_id = render_snapshots._job_id(pid, snap['id'])
+    job = jobs.get(job_id)
+    control = worker.Control()
+    # Simulate a resume that re-executes after a crash between record_history
+    # and jobs.set_status(SUCCEEDED): it must not raise IntegrityError or mark
+    # the already-rendered snapshot FAILED.
+    result = local_render.execute(job, attempts_store, control)
+    assert result['snapshot_id'] == snap['id']
+    assert render_snapshots.get(pid, snap['id'])['status'] == 'READY'
+    with core.connect() as db:
+        count = db.execute('SELECT COUNT(*) FROM render_history WHERE id=?',
+                           (snap['id'],)).fetchone()[0]
+    assert count == 1
+
+
+def test_record_history_is_idempotent(snapshot_project):
+    pid, _rev, _srt = snapshot_project
+    snap = render_snapshots.create(pid)
+    manifest = snap['manifest']
+    output = str(core.HOME / pid / 'renders' / snap['id'] / 'first.mp4')
+    render_snapshots.record_history(pid, snap['id'], manifest, output)
+    render_snapshots.record_history(pid, snap['id'], manifest, output)
+    with core.connect() as db:
+        count = db.execute('SELECT COUNT(*) FROM render_history WHERE id=?',
+                           (snap['id'],)).fetchone()[0]
+    assert count == 1

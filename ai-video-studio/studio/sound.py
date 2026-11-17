@@ -210,12 +210,19 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
         manifest = snap['manifest']
         cfg = manifest.get('config') or {}
         events = manifest.get('audio_events') or []
+        return _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking,
+                    duration=manifest['duration_us'] / 1_000_000.0)
     return _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking)
 
 
-def _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking):
-    """Core FFmpeg mix from a source video, soundtrack config and audio events."""
-    duration = _duration(pid)
+def _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking, duration=None):
+    """Core FFmpeg mix from a source video, soundtrack config and audio events.
+
+    ``duration`` defaults to the current project duration; the snapshot path
+    passes the frozen manifest duration so a mix never re-reads mutable state.
+    """
+    if duration is None:
+        duration = _duration(pid)
     if abs(_probe(source_video) - duration) > 0.5:
         raise ValueError(f'Video duration differs from project: {source_video}')
     root = core.HOME / pid

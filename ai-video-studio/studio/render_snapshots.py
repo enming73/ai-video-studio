@@ -158,6 +158,10 @@ def create(pid, *, timeline_revision_id=None, actor='human'):
         snap = _snapshot_row(db, pid, snapshot_id)
         snap['manifest'] = json.loads(snap['manifest_json'])
         return snap
+    except Exception:
+        if own:
+            db.rollback()
+        raise
     finally:
         if own:
             db.commit()
@@ -243,11 +247,16 @@ def _legacy_history_manifest(manifest, output):
 
 
 def record_history(pid, snapshot_id, manifest, output):
-    """Append a legacy ``render_history`` row for a completed snapshot render."""
+    """Append a legacy ``render_history`` row for a completed snapshot render.
+
+    Idempotent: keyed by ``snapshot_id``, so a resume after a crash between this
+    write and the job's SUCCEEDED transition never collides on the primary key
+    or duplicates the row.
+    """
     with core.connect() as db:
         timeline.migrate(db)
         db.execute(
-            'INSERT INTO render_history(id,project_id,output,manifest_json,created) '
+            'INSERT OR IGNORE INTO render_history(id,project_id,output,manifest_json,created) '
             'VALUES (?,?,?,?,?)',
             (snapshot_id, pid, str(output),
              json.dumps(_legacy_history_manifest(manifest, output)), core.now()))
