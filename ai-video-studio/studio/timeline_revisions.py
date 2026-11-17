@@ -11,6 +11,7 @@ verbatim and only add/change audio clips or subtitle rows.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -279,6 +280,79 @@ def set_video_clip(pid, revision_id, shot_id, asset_id, *, source_in_us, source_
         new_id = _clone(db, pid, revision_id, source=source, actor=actor)
         _set_clip_in_revision(db, new_id, shot_id, asset_id, source_in_us, source_out_us,
                               position, timeline_in_us, timeline_out_us)
+        _promote(db, pid, new_id)
+        return _get(db, pid, new_id, ensure=False)
+    finally:
+        if own:
+            db.commit()
+
+
+def _record_legacy_freeze(db, pid, shot_id, asset_id, planned_us, actual_us):
+    """Record that a compatibility selection froze a short asset to fill its window."""
+    db.execute(
+        'INSERT INTO decisions(id,project_id,node_type,node_id,action,actor,metadata_json,created) '
+        'VALUES (?,?,?,?,?,?,?,?)',
+        (uuid4().hex, pid, 'shot', shot_id, 'legacy_freeze', 'human',
+         json.dumps({'asset_id': asset_id, 'planned_duration_us': planned_us,
+                     'asset_duration_us': actual_us}), core.now()))
+
+
+def replace_clip_asset(pid, shot_id, asset_id, *, actor='human', db=None):
+    """Compatibility asset selection: swap a clip's asset without changing geometry.
+
+    Copy-on-write: clones the current revision and changes only the target
+    clip's ``asset_id``, preserving ``source_in_us``/``source_out_us``/``position``/
+    ``timeline_in_us``/``timeline_out_us``. This is the legacy ``timeline.select``
+    path; it never runs gap/overlap validation, so replacing an asset can never
+    fail with a spurious geometry error. A probeable asset shorter than the
+    existing source window is allowed (legacy last-frame freeze) and recorded as
+    a ``legacy_freeze`` decision rather than silently re-tiled.
+    """
+    db, own = _connect(db)
+    try:
+        rid = _ensure(db, pid)
+        asset = db.execute(
+            'SELECT * FROM shot_assets WHERE id=? AND project_id=? AND shot_id=?',
+            (asset_id, pid, shot_id)).fetchone()
+        if asset is None:
+            raise ValueError(f'missing asset {asset_id}')
+        shot = db.execute('SELECT * FROM shots WHERE id=?', (shot_id,)).fetchone()
+        if shot is None:
+            raise ValueError('Unknown shot')
+        clip = db.execute(
+            'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=? AND shot_id=?',
+            (rid, shot_id)).fetchone()
+        if clip is not None:
+            position = clip['position']
+            source_in_us = 0
+            source_out_us = clip['timeline_out_us'] - clip['timeline_in_us']
+            timeline_in_us = clip['timeline_in_us']
+            timeline_out_us = clip['timeline_out_us']
+        else:
+            position = shot['seq']
+            source_in_us = 0
+            source_out_us = shot['duration'] * MICRO
+            others = db.execute(
+                'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=?', (rid,)).fetchall()
+            preceding = [c for c in others if c['position'] < position]
+            timeline_in_us = max((c['timeline_out_us'] for c in preceding), default=0)
+            timeline_out_us = timeline_in_us + source_out_us
+
+        source = 'manual' if actor == 'human' else 'automatic'
+        new_id = _clone(db, pid, rid, source=source, actor=actor)
+        db.execute('DELETE FROM timeline_video_clips WHERE timeline_revision_id=? AND shot_id=?',
+                   (new_id, shot_id))
+        db.execute(
+            'INSERT INTO timeline_video_clips(id,timeline_revision_id,shot_id,asset_id,position,'
+            'source_in_us,source_out_us,timeline_in_us,timeline_out_us,created) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?)',
+            (uuid4().hex, new_id, shot_id, asset_id, position, source_in_us, source_out_us,
+             timeline_in_us, timeline_out_us, core.now()))
+
+        asset_dur = _asset_duration_us(db, asset_id)
+        if asset_dur is not None and (source_out_us - source_in_us) > asset_dur:
+            _record_legacy_freeze(db, pid, shot_id, asset_id,
+                                  source_out_us - source_in_us, asset_dur)
         _promote(db, pid, new_id)
         return _get(db, pid, new_id, ensure=False)
     finally:

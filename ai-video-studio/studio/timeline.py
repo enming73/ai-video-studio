@@ -105,8 +105,12 @@ def select(pid, seq, aid):
 
     Creates a new timeline revision whose video clip for the shot points at the
     new asset, then refreshes the ``timeline_items`` compatibility projection.
-    ``timeline_items`` is never written as truth here. Existing guided
-    confirmation/stale-shot side effects are preserved.
+    ``timeline_items`` is never written as truth here. Replacing an asset never
+    changes the timeline geometry: the clip keeps its existing position and
+    timeline window (or the shot's planned duration when there is no current
+    clip). A probeable asset shorter than that window is allowed and recorded as
+    a ``legacy_freeze`` decision. Existing guided confirmation/stale-shot side
+    effects are preserved.
     """
     with core.connect() as db:
         migrate(db)
@@ -116,7 +120,6 @@ def select(pid, seq, aid):
         if not a: raise ValueError('Asset does not belong to this shot')
         if not Path(a['file']).is_file(): raise ValueError('Asset file is missing')
         from . import edit_model, timeline_revisions
-        state = edit_model._current(db, pid)
         edit_model._sync_legacy_projection(db, pid)
         old=db.execute('SELECT asset_id FROM timeline_items WHERE project_id=? AND shot_id=?',(pid,shot['id'])).fetchone()
         if old is None or old['asset_id'] != aid:
@@ -128,15 +131,7 @@ def select(pid, seq, aid):
                 db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,shot['id']))
             elif db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
                 db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid,shot['id']))
-        current_clip = db.execute(
-            'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=? AND shot_id=?',
-            (state['timeline_revision_id'], shot['id'])).fetchone()
-        position = current_clip['position'] if current_clip else shot['seq']
-        source_out_us = edit_model._probe_duration_us(a['file']) or (shot['duration'] * edit_model.MICRO)
-        timeline_revisions.set_video_clip(
-            pid, state['timeline_revision_id'], shot['id'], aid,
-            source_in_us=0, source_out_us=source_out_us, position=position,
-            actor='human', db=db)
+        timeline_revisions.replace_clip_asset(pid, shot['id'], aid, actor='human', db=db)
         edit_model._sync_legacy_projection(db, pid)
     return aid
 

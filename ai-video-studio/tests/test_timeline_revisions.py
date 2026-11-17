@@ -192,6 +192,68 @@ def test_legacy_selection_writes_revision_and_projection(timeline_project):
     assert timeline_revisions.get(pid, after)['video_clips'][0]['asset_id'] == asset_id
 
 
+def test_select_preserves_geometry_for_probeable_short_asset(tmp_path, monkeypatch):
+    """Selecting a probeable asset shorter than the planned window must not
+    raise gap/overlap and must keep the existing timeline geometry.
+
+    Regression: ``select`` once derived ``source_out_us`` from FFprobe, so a
+    real clip whose duration differed from the shot's planned duration would
+    shrink the clip and open a gap against the next shot (HTTP 400). The
+    compatibility path must preserve geometry and record a ``legacy_freeze``
+    decision instead.
+    """
+    import json
+    import subprocess
+    monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
+    pid = core.create('Probeable selection', 20, 'mock', 0)
+    core.plan(pid, 10)  # two 10-second shots
+    with core.connect() as db:
+        shots = db.execute(
+            'SELECT * FROM shots WHERE project_id=? ORDER BY seq', (pid,)).fetchall()
+    root = core.HOME / pid
+    # Establish current clips (10s each) via non-probeable fake assets.
+    fake_ids = []
+    for s in shots:
+        fake = root / f'{s["id"]}.mp4'
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        fake.write_bytes(b'fake-' + s['id'].encode())
+        fake_ids.append(timeline.import_asset(pid, s['seq'], str(fake)))
+    for s, fid in zip(shots, fake_ids):
+        timeline.select(pid, s['seq'], fid)
+    before = timeline_revisions.current(pid)['video_clips']
+    assert [c['timeline_out_us'] - c['timeline_in_us'] for c in before] == \
+        [10_000_000, 10_000_000]
+    # A real, probeable 3-second clip for shot 1 (shorter than its 10s window).
+    short = root / 'short.mp4'
+    subprocess.run(['ffmpeg', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+                    'color=c=blue:s=320x180:r=24:d=3', '-c:v', 'libx264',
+                    '-pix_fmt', 'yuv420p', str(short)], check=True)
+    short_id = timeline.import_asset(pid, shots[0]['seq'], str(short))
+    # Selecting the short asset must not raise and must preserve geometry.
+    timeline.select(pid, shots[0]['seq'], short_id)
+    clips = {c['shot_id']: c for c in timeline_revisions.current(pid)['video_clips']}
+    c0 = clips[shots[0]['id']]
+    assert c0['asset_id'] == short_id
+    assert c0['position'] == before[0]['position']
+    assert c0['timeline_in_us'] == before[0]['timeline_in_us']
+    assert c0['timeline_out_us'] == before[0]['timeline_out_us']
+    # The neighboring clip is untouched.
+    c1 = clips[shots[1]['id']]
+    assert c1['timeline_in_us'] == before[1]['timeline_in_us']
+    assert c1['timeline_out_us'] == before[1]['timeline_out_us']
+    # The short asset is recorded as a legacy_freeze decision.
+    with core.connect() as db:
+        freezes = db.execute(
+            "SELECT * FROM decisions WHERE project_id=? AND action='legacy_freeze'",
+            (pid,)).fetchall()
+    assert len(freezes) == 1
+    assert freezes[0]['node_id'] == shots[0]['id']
+    metadata = json.loads(freezes[0]['metadata_json'])
+    assert metadata['asset_id'] == short_id
+    assert metadata['planned_duration_us'] == 10_000_000
+    assert metadata['asset_duration_us'] < 10_000_000
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
