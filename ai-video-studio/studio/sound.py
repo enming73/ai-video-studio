@@ -50,6 +50,7 @@ def configure(pid, narration=None, music=None, ambience=None, subtitles=None,
             'ambience_gain':ambience_gain,'fade_seconds':fade_seconds}
     target=_config_path(pid); target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')
+    _record_timeline_revision(pid)
     return config
 
 
@@ -62,6 +63,20 @@ def config(pid):
 
 def _events_path(pid):
     return core.HOME/pid/'audio-events.json'
+
+
+def _record_timeline_revision(pid):
+    """Record sound config/events into the current timeline revision (copy-on-write).
+
+    Best-effort: no-ops for unit-test projects without a DB row. Audio/subtitle
+    edits clone the current timeline revision and never touch video clips or
+    assets.
+    """
+    from . import timeline_revisions
+    try:
+        timeline_revisions.sync_audio_subtitles(pid)
+    except ValueError:
+        return
 
 
 def audio_list(pid):
@@ -86,6 +101,7 @@ def audio_add(pid, file, at, duration=None, gain=1.0, fade_in=0.0, fade_out=0.0)
     events.append(event)
     target=_events_path(pid);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(events,indent=2,ensure_ascii=False),encoding='utf-8')
+    _record_timeline_revision(pid)
     return event
 
 
@@ -94,6 +110,7 @@ def audio_remove(pid, event_id):
     remaining=[e for e in events if e['id']!=event_id]
     if len(remaining)==len(events): raise ValueError('Unknown audio event')
     _events_path(pid).write_text(json.dumps(remaining,indent=2,ensure_ascii=False),encoding='utf-8')
+    _record_timeline_revision(pid)
     return remaining
 
 
@@ -118,6 +135,7 @@ def audio_update(pid, event_id, *, at=None, duration=None, gain=None):
     temp = target.with_suffix('.tmp')
     temp.write_text(json.dumps(events, indent=2, ensure_ascii=False), encoding='utf-8')
     temp.replace(target)
+    _record_timeline_revision(pid)
     return event
 
 

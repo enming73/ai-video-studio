@@ -107,6 +107,83 @@ def storyboard_revisions_structure(pid: str, rid: str, body: StoryboardStructure
     return api_call(storyboard_revisions.reorder, pid, rid, body.ordered_shot_ids, actor='human')
 
 
+# M2: copy-on-write timeline revisions. Existing timeline/selection URLs remain;
+# these endpoints expose the revisioned timeline truth additively.
+class TimelineDraftRequest(BaseModel):
+    actor: str = 'human'
+
+
+class TimelineClipUpdate(BaseModel):
+    asset_id: str
+    source_in_us: int = Field(ge=0)
+    source_out_us: int = Field(gt=0)
+    position: int = Field(ge=1)
+    actor: str = 'human'
+
+
+class TimelineAudioClip(BaseModel):
+    kind: str
+    file: str
+    source_out_us: int = Field(gt=0)
+    source_in_us: int = Field(default=0, ge=0)
+    timeline_in_us: int = Field(default=0, ge=0)
+    timeline_out_us: int | None = Field(default=None, gt=0)
+    gain: float = Field(default=1.0, ge=0, le=3)
+    fade_in_us: int = Field(default=0, ge=0)
+    fade_out_us: int = Field(default=0, ge=0)
+    actor: str = 'human'
+
+
+class TimelineSubtitles(BaseModel):
+    srt_file: str
+    language: str | None = None
+    actor: str = 'human'
+
+
+@app.get('/api/projects/{pid}/timeline/revisions')
+def timeline_revisions_list(pid: str):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.list_revisions, pid)
+
+
+@app.post('/api/projects/{pid}/timeline/revisions')
+def timeline_revisions_create(pid: str, body: TimelineDraftRequest | None = None):
+    from . import timeline_revisions
+    body = body or TimelineDraftRequest()
+    return api_call(timeline_revisions.create_draft, pid, actor=body.actor)
+
+
+@app.get('/api/projects/{pid}/timeline/revisions/{rid}')
+def timeline_revisions_get(pid: str, rid: str):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.get, pid, rid)
+
+
+@app.patch('/api/projects/{pid}/timeline/revisions/{rid}/clips/{shot_id}')
+def timeline_revisions_update_clip(pid: str, rid: str, shot_id: str, body: TimelineClipUpdate):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.set_video_clip, pid, rid, shot_id, body.asset_id,
+                    source_in_us=body.source_in_us, source_out_us=body.source_out_us,
+                    position=body.position, actor=body.actor)
+
+
+@app.post('/api/projects/{pid}/timeline/revisions/{rid}/audio')
+def timeline_revisions_add_audio(pid: str, rid: str, body: TimelineAudioClip):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.add_audio_clip, pid, rid, kind=body.kind,
+                    file=body.file, source_in_us=body.source_in_us,
+                    source_out_us=body.source_out_us, timeline_in_us=body.timeline_in_us,
+                    timeline_out_us=body.timeline_out_us, gain=body.gain,
+                    fade_in_us=body.fade_in_us, fade_out_us=body.fade_out_us, actor=body.actor)
+
+
+@app.put('/api/projects/{pid}/timeline/revisions/{rid}/subtitles')
+def timeline_revisions_set_subtitles(pid: str, rid: str, body: TimelineSubtitles):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.set_subtitles, pid, rid, body.srt_file,
+                    language=body.language, actor=body.actor)
+
+
 @app.post('/api/projects/{pid}/sync')
 def sync(pid: str):
     return api_call(timeline.sync,pid)

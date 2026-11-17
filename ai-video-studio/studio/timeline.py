@@ -101,6 +101,13 @@ def assets(pid, seq=None):
 
 
 def select(pid, seq, aid):
+    """Select ``aid`` for shot ``seq`` by copy-on-write timeline revision.
+
+    Creates a new timeline revision whose video clip for the shot points at the
+    new asset, then refreshes the ``timeline_items`` compatibility projection.
+    ``timeline_items`` is never written as truth here. Existing guided
+    confirmation/stale-shot side effects are preserved.
+    """
     with core.connect() as db:
         migrate(db)
         shot=next((s for s in _shots(db,pid) if s['seq']==seq),None)
@@ -108,6 +115,9 @@ def select(pid, seq, aid):
         a=db.execute('SELECT * FROM shot_assets WHERE id=? AND project_id=? AND shot_id=?',(aid,pid,shot['id'])).fetchone()
         if not a: raise ValueError('Asset does not belong to this shot')
         if not Path(a['file']).is_file(): raise ValueError('Asset file is missing')
+        from . import edit_model, timeline_revisions
+        state = edit_model._current(db, pid)
+        edit_model._sync_legacy_projection(db, pid)
         old=db.execute('SELECT asset_id FROM timeline_items WHERE project_id=? AND shot_id=?',(pid,shot['id'])).fetchone()
         if old is None or old['asset_id'] != aid:
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?',(pid,shot['id']))
@@ -118,14 +128,29 @@ def select(pid, seq, aid):
                 db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,shot['id']))
             elif db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
                 db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid,shot['id']))
-        db.execute('INSERT INTO timeline_items VALUES(?,?,?,?,?) ON CONFLICT(project_id,shot_id) DO UPDATE SET asset_id=excluded.asset_id, position=excluded.position, duration=excluded.duration',
-                   (pid,shot['id'],aid,shot['seq'],shot['duration']))
+        current_clip = db.execute(
+            'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=? AND shot_id=?',
+            (state['timeline_revision_id'], shot['id'])).fetchone()
+        position = current_clip['position'] if current_clip else shot['seq']
+        source_out_us = edit_model._probe_duration_us(a['file']) or (shot['duration'] * edit_model.MICRO)
+        timeline_revisions.set_video_clip(
+            pid, state['timeline_revision_id'], shot['id'], aid,
+            source_in_us=0, source_out_us=source_out_us, position=position,
+            actor='human', db=db)
+        edit_model._sync_legacy_projection(db, pid)
     return aid
 
 
 def timeline(pid):
+    """Return the existing React timeline shape from the current revision.
+
+    ``timeline_items`` is refreshed from the current timeline revision via
+    ``edit_model.sync_legacy_projection`` and then read as before.
+    """
     with core.connect() as db:
         migrate(db)
+        from . import edit_model
+        edit_model._sync_legacy_projection(db, pid)
         shots=_shots(db,pid)
         items=[]
         for s in shots:
