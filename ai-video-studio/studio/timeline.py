@@ -134,6 +134,20 @@ def timeline(pid):
     return items
 
 
+def current_video_clips(pid):
+    """Read-only view of the current timeline revision's video clips.
+
+    Lazily materializes legacy state on first access. This is a read-compatible
+    helper only: it never writes ``timeline_items``, revisions, or media.
+    """
+    from . import edit_model
+    with core.connect() as db:
+        state = edit_model.current(pid, db)
+        return [dict(r) for r in db.execute(
+            'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=? '
+            'ORDER BY position', (state['timeline_revision_id'],))]
+
+
 def render(pid, output=None, source='selected'):
     """Render a snapshot; never overwrite existing output or mutate original shots."""
     if source not in ('selected','original','i2v','mixed'):

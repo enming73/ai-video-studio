@@ -257,7 +257,7 @@ def test_connect_applies_migrations_to_new_database(tmp_path, monkeypatch):
     with core.connect() as db:
         versions = [row[0] for row in db.execute(
             'SELECT version FROM schema_migrations ORDER BY version')]
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5, 6]
 
 
 def test_connect_migrates_existing_database_once(tmp_path, monkeypatch):
@@ -270,7 +270,25 @@ def test_connect_migrates_existing_database_once(tmp_path, monkeypatch):
         migrations_count = db.execute(
             'SELECT COUNT(*) FROM schema_migrations').fetchone()[0]
     assert first == second == 1
-    assert migrations_count == 4
+    assert migrations_count == 6
+
+
+def test_migration_006_initializes_project_state_without_revisions(tmp_path, monkeypatch):
+    legacy_database(tmp_path)
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    with core.connect() as db:
+        state = db.execute(
+            'SELECT * FROM project_state WHERE project_id=?', ('legacy',)).fetchone()
+    assert state is not None
+    assert state['current_storyboard_revision_id'] is None
+    assert state['current_timeline_revision_id'] is None
+    with core.connect() as db:
+        # 006 only initializes project_state; it must never probe media or
+        # create revisions.
+        assert db.execute('SELECT COUNT(*) FROM storyboard_revisions').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM timeline_revisions').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM shot_revisions').fetchone()[0] == 0
+
 
 
 def test_connect_creates_backup_before_upgrading_existing_database(tmp_path, monkeypatch):
