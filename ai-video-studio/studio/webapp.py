@@ -57,6 +57,56 @@ def projects():
 def project(pid: str):
     return api_call(core.storyboard,pid)
 
+
+# M2: copy-on-write storyboard revisions. Existing Guided shot/structure URLs
+# remain; these endpoints expose the revisioned storyboard truth additively.
+class StoryboardDraftRequest(BaseModel):
+    actor: str = 'human'
+    source: str = 'manual'
+
+
+class StoryboardShotUpdate(BaseModel):
+    prompt: str | None = Field(default=None, min_length=1, max_length=10000)
+    duration: int | None = Field(default=None, ge=1, le=600)
+    actor: str = 'human'
+
+
+class StoryboardStructure(BaseModel):
+    ordered_shot_ids: list[str]
+
+
+@app.get('/api/projects/{pid}/storyboard/revisions')
+def storyboard_revisions_list(pid: str):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.list_revisions, pid)
+
+
+@app.post('/api/projects/{pid}/storyboard/revisions')
+def storyboard_revisions_create(pid: str, body: StoryboardDraftRequest | None = None):
+    from . import storyboard_revisions
+    body = body or StoryboardDraftRequest()
+    return api_call(storyboard_revisions.create_draft, pid, actor=body.actor, source=body.source)
+
+
+@app.get('/api/projects/{pid}/storyboard/revisions/{rid}')
+def storyboard_revisions_get(pid: str, rid: str):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.get, pid, rid)
+
+
+@app.patch('/api/projects/{pid}/storyboard/revisions/{rid}/shots/{shot_id}')
+def storyboard_revisions_update_shot(pid: str, rid: str, shot_id: str, body: StoryboardShotUpdate):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.update_shot, pid, rid, shot_id,
+                    prompt=body.prompt, duration=body.duration, actor=body.actor)
+
+
+@app.put('/api/projects/{pid}/storyboard/revisions/{rid}/structure')
+def storyboard_revisions_structure(pid: str, rid: str, body: StoryboardStructure):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.reorder, pid, rid, body.ordered_shot_ids, actor='human')
+
+
 @app.post('/api/projects/{pid}/sync')
 def sync(pid: str):
     return api_call(timeline.sync,pid)

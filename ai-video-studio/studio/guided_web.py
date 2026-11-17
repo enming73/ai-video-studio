@@ -328,6 +328,13 @@ def get(pid: str):
     return call(guided_workflow.get, pid)
 
 
+@router.get('/decisions')
+def decisions(pid: str):
+    from . import storyboard_revisions
+    call(guided_workflow.get, pid)
+    return call(storyboard_revisions.current, pid)['decisions']
+
+
 @router.post('/plan/preview')
 def plan_preview(pid: str, body: Plan):
     call(guided_workflow.get, pid)

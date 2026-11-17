@@ -156,6 +156,11 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         old_ids = [s['id'] for s in old_rows]
         old_by_id = {s['id']: s for s in old_rows}
 
+        # Materialize the base storyboard revision before mutating the legacy
+        # projection, so the base revision preserves the pre-structure shot list.
+        from . import storyboard_revisions
+        storyboard_revisions._ensure(db, pid)
+
         new_ids = []
         seen = set()
         for shot in shots:
@@ -238,5 +243,10 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
             guided_boundaries.mark_affected(db, pid, boundary_id)
 
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+
+        storyboard_revisions._snapshot(db, pid, source='guided', actor='human')
+        storyboard_revisions._record_decision(db, pid, node_type='storyboard', node_id=pid,
+                                              action='accept', actor='human',
+                                              metadata={'shots': new_ids})
 
     return guided_workflow.get(pid)
