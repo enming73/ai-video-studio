@@ -98,6 +98,9 @@ def _invalidate_character(db, pid, cid):
         db.execute('INSERT INTO guided_stale_shots(project_id,shot_id,keep_asset_id) VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid, row['shot_id']))
     from . import guided_boundaries
     guided_boundaries.invalidate_for_character(db, pid, cid)
+    from . import edit_readiness
+    edit_readiness.invalidate(pid, node_type='character', node_id=cid,
+                              reason='character changed', db=db)
 
 
 def invalidate_shot(db, pid, shot_id):
@@ -220,6 +223,9 @@ def set_shot_characters(pid: str, seq: int, character_ids: list[str], revision: 
             db.execute('DELETE FROM guided_shot_characters WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             for cid in character_ids:
                 db.execute('INSERT INTO guided_shot_characters VALUES (?,?,?)', (pid, shot['id'], cid))
+            from . import edit_readiness
+            edit_readiness.invalidate(pid, node_type='reference', node_id=shot['id'],
+                                      reason='shot cast changed', db=db)
         if previous != set(character_ids) or not reviewed:
             db.execute('INSERT OR IGNORE INTO guided_shot_cast_reviewed VALUES (?,?)', (pid, shot['id']))
             _changed(db, pid)

@@ -446,6 +446,10 @@ def confirm(pid: str, boundary_id: str, image_id: str, revision: int, *, allow_s
                    (image_id, boundary_id, pid))
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
         affected = mark_affected(db, pid, boundary_id)
+        if affected:
+            from . import edit_readiness
+            edit_readiness.invalidate(pid, node_type='boundary', node_id=boundary_id,
+                                      reason='boundary frame changed', db=db)
     return {'confirmed_image_id': image_id, 'revision': revision + 1, 'affected_shot_ids': affected}
 
 
@@ -462,6 +466,10 @@ def unconfirm(pid: str, boundary_id: str, revision: int) -> dict:
                    (boundary_id, pid))
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
         affected = mark_affected(db, pid, boundary_id)
+        if affected:
+            from . import edit_readiness
+            edit_readiness.invalidate(pid, node_type='boundary', node_id=boundary_id,
+                                      reason='boundary frame changed', db=db)
     return {'revision': revision + 1, 'affected_shot_ids': affected}
 
 

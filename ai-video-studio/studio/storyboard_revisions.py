@@ -230,6 +230,10 @@ def _update_shot(db, pid, revision_id, shot_id, *, prompt=None, duration=None,
     if updates:
         db.execute('UPDATE shots SET prompt=?, duration=? WHERE id=?',
                    (new_prompt, new_duration, shot_id))
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='shot', node_id=shot_id,
+                                  reason='shot content changed (' + ', '.join(updates) + ')',
+                                  db=db)
     return _get(db, pid, new_id, ensure=False)
 
 
@@ -259,6 +263,9 @@ def reorder(pid, revision_id, ordered_shot_ids, *, actor='human', db=None):
         if set(ordered_shot_ids) != shot_ids:
             raise ValueError('ordered_shot_ids must match the revision shots')
         source = 'manual' if actor == 'human' else 'automatic'
+        current_order = [r['shot_id'] for r in db.execute(
+            'SELECT shot_id FROM shot_revisions WHERE storyboard_revision_id=? ORDER BY seq',
+            (revision_id,)).fetchall()]
         updates = {sid: {'seq': idx} for idx, sid in enumerate(ordered_shot_ids, 1)}
         new_id = _clone(db, pid, revision_id, source=source, actor=actor,
                         shot_updates=updates)
@@ -267,6 +274,10 @@ def reorder(pid, revision_id, ordered_shot_ids, *, actor='human', db=None):
         db.execute('UPDATE shots SET seq = seq + 1000000 WHERE project_id=? AND archived=0', (pid,))
         for idx, sid in enumerate(ordered_shot_ids, 1):
             db.execute('UPDATE shots SET seq=? WHERE id=?', (idx, sid))
+        if list(ordered_shot_ids) != current_order:
+            from . import edit_readiness
+            edit_readiness.invalidate(pid, node_type='storyboard', node_id=pid,
+                                      reason='shot order changed', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:

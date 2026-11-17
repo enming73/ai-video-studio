@@ -281,6 +281,9 @@ def set_video_clip(pid, revision_id, shot_id, asset_id, *, source_in_us, source_
         _set_clip_in_revision(db, new_id, shot_id, asset_id, source_in_us, source_out_us,
                               position, timeline_in_us, timeline_out_us)
         _promote(db, pid, new_id)
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='clip', node_id=shot_id,
+                                  reason='video clip source range changed', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:
@@ -354,6 +357,9 @@ def replace_clip_asset(pid, shot_id, asset_id, *, actor='human', db=None):
             _record_legacy_freeze(db, pid, shot_id, asset_id,
                                   source_out_us - source_in_us, asset_dur)
         _promote(db, pid, new_id)
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='asset', node_id=shot_id,
+                                  reason='selected asset changed', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:
@@ -383,6 +389,9 @@ def add_audio_clip(pid, revision_id, *, kind, file, source_out_us, source_in_us=
              source_in_us, source_out_us, timeline_in_us, timeline_out_us,
              float(gain), int(fade_in_us), int(fade_out_us), core.now()))
         _promote(db, pid, new_id)
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='audio', node_id=pid,
+                                  reason='audio clip added', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:
@@ -406,6 +415,9 @@ def set_subtitles(pid, revision_id, srt_file, *, language=None, actor='human', d
             'VALUES (?,?,?,?,?,?)',
             (uuid4().hex, new_id, str(path), edit_model._hash_file(str(path)), language, core.now()))
         _promote(db, pid, new_id)
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='subtitle', node_id=pid,
+                                  reason='subtitles changed', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:
@@ -443,6 +455,11 @@ def sync_audio_subtitles(pid, *, actor='human', db=None):
         edit_model._materialize_audio_clips(db, pid, new_id)
         edit_model._materialize_subtitles(db, pid, new_id)
         _promote(db, pid, new_id)
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='audio', node_id=pid,
+                                  reason='audio clips changed', db=db)
+        edit_readiness.invalidate(pid, node_type='subtitle', node_id=pid,
+                                  reason='subtitles changed', db=db)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:

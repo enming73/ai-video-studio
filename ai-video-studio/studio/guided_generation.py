@@ -453,6 +453,16 @@ def _update(pid, aid, **values):
 def _register(pid, aid, seq, target):
     asset = timeline.import_asset(pid, seq, str(target), source='guided:' + aid)
     _update(pid, aid, status='COMPLETED', file=str(target), asset_id=asset, error=None)
+    # The system generated and registered a selectable asset for this shot. This
+    # is an honest system decision, never a fabricated human confirmation.
+    from . import storyboard_revisions
+    with core.connect() as db:
+        shot = db.execute('SELECT id FROM shots WHERE project_id=? AND seq=?',
+                          (pid, seq)).fetchone()
+        if shot:
+            storyboard_revisions._record_decision(
+                db, pid, node_type='shot', node_id=shot['id'], action='select',
+                actor='system', metadata={'asset_id': asset})
 
 
 def recover(pid: str, attempt_id: str, remote_id: str | None = None, *,
