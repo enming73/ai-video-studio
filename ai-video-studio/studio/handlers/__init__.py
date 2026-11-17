@@ -4,7 +4,7 @@ from __future__ import annotations
 
 def register_all() -> None:
     from ..worker import register
-    from . import image, llm_narration, llm_prompt, llm_storyboard, tts_segment, video, vision_review
+    from . import image, llm_narration, llm_prompt, llm_storyboard, tts_segment, video, vision_review, local_render
     register('video', video)
     register('llm_storyboard', llm_storyboard)
     register('image', image)
@@ -12,3 +12,4 @@ def register_all() -> None:
     register('llm_narration', llm_narration)
     register('tts_segment', tts_segment)
     register('vision_review', vision_review)
+    register('local_render', local_render)

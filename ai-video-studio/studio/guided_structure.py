@@ -156,6 +156,11 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         old_ids = [s['id'] for s in old_rows]
         old_by_id = {s['id']: s for s in old_rows}
 
+        # Materialize the base storyboard revision before mutating the legacy
+        # projection, so the base revision preserves the pre-structure shot list.
+        from . import storyboard_revisions
+        storyboard_revisions._ensure(db, pid)
+
         new_ids = []
         seen = set()
         for shot in shots:
@@ -169,6 +174,14 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
                 raise ValueError('Unknown shot id')
             if enabled:
                 guided_characters._validate_ids(db, pid, shot['character_ids'])
+
+        # Detect structure changes that move or resize the timeline. Prompt-only
+        # edits (and literal no-ops) do not affect clip order/windows, so they
+        # must not mint a redundant timeline revision.
+        order_changed = new_ids != old_ids
+        duration_changed = any(
+            shot.get('id') is not None and shot['duration'] != old_by_id[sid]['duration']
+            for shot, sid in zip(shots, new_ids))
 
         # Duration changes on a shot with generated media are only allowed when
         # the shot's neighbours change too (its video is invalidated anyway).
@@ -238,5 +251,20 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
             guided_boundaries.mark_affected(db, pid, boundary_id)
 
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+
+        storyboard_revisions._snapshot(db, pid, source='guided', actor='human')
+        if order_changed or duration_changed:
+            # Derive a new timeline revision matching the new storyboard order
+            # and shot windows (audio/subtitles preserved, duration recomputed,
+            # legacy projection refreshed) — the same path storyboard_revisions
+            # uses for reorder/duration edits.
+            from . import timeline_revisions
+            timeline_revisions._derive_from_storyboard(db, pid, actor='human')
+        storyboard_revisions._record_decision(db, pid, node_type='storyboard', node_id=pid,
+                                              action='accept', actor='human',
+                                              metadata={'shots': new_ids})
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='storyboard', node_id=pid,
+                                  reason='storyboard structure changed', db=db)
 
     return guided_workflow.get(pid)

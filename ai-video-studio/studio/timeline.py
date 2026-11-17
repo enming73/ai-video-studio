@@ -101,6 +101,17 @@ def assets(pid, seq=None):
 
 
 def select(pid, seq, aid):
+    """Select ``aid`` for shot ``seq`` by copy-on-write timeline revision.
+
+    Creates a new timeline revision whose video clip for the shot points at the
+    new asset, then refreshes the ``timeline_items`` compatibility projection.
+    ``timeline_items`` is never written as truth here. Replacing an asset never
+    changes the timeline geometry: the clip keeps its existing position and
+    timeline window (or the shot's planned duration when there is no current
+    clip). A probeable asset shorter than that window is allowed and recorded as
+    a ``legacy_freeze`` decision. Existing guided confirmation/stale-shot side
+    effects are preserved.
+    """
     with core.connect() as db:
         migrate(db)
         shot=next((s for s in _shots(db,pid) if s['seq']==seq),None)
@@ -108,6 +119,8 @@ def select(pid, seq, aid):
         a=db.execute('SELECT * FROM shot_assets WHERE id=? AND project_id=? AND shot_id=?',(aid,pid,shot['id'])).fetchone()
         if not a: raise ValueError('Asset does not belong to this shot')
         if not Path(a['file']).is_file(): raise ValueError('Asset file is missing')
+        from . import edit_model, timeline_revisions
+        edit_model._sync_legacy_projection(db, pid)
         old=db.execute('SELECT asset_id FROM timeline_items WHERE project_id=? AND shot_id=?',(pid,shot['id'])).fetchone()
         if old is None or old['asset_id'] != aid:
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?',(pid,shot['id']))
@@ -118,14 +131,21 @@ def select(pid, seq, aid):
                 db.execute('DELETE FROM guided_stale_shots WHERE project_id=? AND shot_id=?', (pid,shot['id']))
             elif db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
                 db.execute('INSERT INTO guided_stale_shots VALUES (?,?,NULL) ON CONFLICT(project_id,shot_id) DO UPDATE SET keep_asset_id=NULL', (pid,shot['id']))
-        db.execute('INSERT INTO timeline_items VALUES(?,?,?,?,?) ON CONFLICT(project_id,shot_id) DO UPDATE SET asset_id=excluded.asset_id, position=excluded.position, duration=excluded.duration',
-                   (pid,shot['id'],aid,shot['seq'],shot['duration']))
+        timeline_revisions.replace_clip_asset(pid, shot['id'], aid, actor='human', db=db)
+        edit_model._sync_legacy_projection(db, pid)
     return aid
 
 
 def timeline(pid):
+    """Return the existing React timeline shape from the current revision.
+
+    ``timeline_items`` is refreshed from the current timeline revision via
+    ``edit_model.sync_legacy_projection`` and then read as before.
+    """
     with core.connect() as db:
         migrate(db)
+        from . import edit_model
+        edit_model._sync_legacy_projection(db, pid)
         shots=_shots(db,pid)
         items=[]
         for s in shots:
@@ -134,10 +154,47 @@ def timeline(pid):
     return items
 
 
+def current_video_clips(pid):
+    """Read-only view of the current timeline revision's video clips.
+
+    Lazily materializes legacy state on first access. This is a read-compatible
+    helper only: it never writes ``timeline_items``, revisions, or media.
+    """
+    from . import edit_model
+    with core.connect() as db:
+        state = edit_model.current(pid, db)
+        return [dict(r) for r in db.execute(
+            'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=? '
+            'ORDER BY position', (state['timeline_revision_id'],))]
+
+
 def render(pid, output=None, source='selected'):
-    """Render a snapshot; never overwrite existing output or mutate original shots."""
-    if source not in ('selected','original','i2v','mixed'):
+    """Render a reproducible snapshot and return its output path.
+
+    ``source == 'selected'`` renders a frozen snapshot of the current timeline
+    revision (copy-on-write truth). The legacy non-revisioned sources
+    (``original``/``i2v``/``mixed``) keep the previous renderer. Never
+    overwrites existing output or mutates original shots.
+    """
+    if source not in ('selected', 'original', 'i2v', 'mixed'):
         raise ValueError('source must be selected, original, i2v or mixed')
+    if source != 'selected':
+        return _render_legacy(pid, output, source)
+    from . import render_snapshots
+    snap = render_snapshots.create(pid)
+    snap = render_snapshots.run_and_wait(pid, snap['id'])
+    if snap['status'] != 'READY':
+        raise ValueError(snap.get('error') or 'Render failed')
+    if output is not None:
+        target = Path(output).expanduser().resolve()
+        if target.exists():
+            raise ValueError(f'Output exists; refusing overwrite: {target}')
+        return Path(render_snapshots.reexport(pid, snap['id'], output=target)['output'])
+    return Path(snap['output'])
+
+
+def _render_legacy(pid, output, source):
+    """Legacy renderer for non-revisioned sources; never overwrite existing output."""
     core.require_ffmpeg()
     with core.connect() as db:
         migrate(db)
@@ -147,19 +204,10 @@ def render(pid, output=None, source='selected'):
         if not shots: raise ValueError('No shots')
         guided=db.execute('SELECT * FROM guided_projects WHERE project_id=?',(pid,)).fetchone()
         if guided:
-            if not guided['storyboard_confirmed'] or source != 'selected':
-                raise ValueError('Guided render requires confirmed storyboard and selected assets')
-            from . import guided_characters
-            guided_characters.require_render_ready(db, pid)
-            for s in shots:
-                approval=db.execute('''SELECT 1 FROM guided_confirmations c
-                    JOIN timeline_items t ON t.project_id=c.project_id AND t.shot_id=c.shot_id
-                    WHERE c.project_id=? AND c.shot_id=? AND c.asset_id=t.asset_id AND c.prompt=?''',
-                    (pid,s['id'],s['prompt'])).fetchone()
-                if not approval: raise ValueError('All guided shots must be confirmed before render')
+            raise ValueError('Guided render requires confirmed storyboard and selected assets')
         selected=[]
         for s in shots:
-            if source in ('selected','mixed'):
+            if source == 'mixed':
                 a=db.execute('SELECT a.* FROM timeline_items t JOIN shot_assets a ON a.id=t.asset_id WHERE t.project_id=? AND t.shot_id=?',(pid,s['id'])).fetchone()
             else:
                 a=db.execute('SELECT * FROM shot_assets WHERE shot_id=? AND source=? ORDER BY created DESC LIMIT 1',(s['id'],source)).fetchone()

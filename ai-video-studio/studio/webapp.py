@@ -57,6 +57,133 @@ def projects():
 def project(pid: str):
     return api_call(core.storyboard,pid)
 
+
+# M2: copy-on-write storyboard revisions. Existing Guided shot/structure URLs
+# remain; these endpoints expose the revisioned storyboard truth additively.
+class StoryboardDraftRequest(BaseModel):
+    actor: str = 'human'
+    source: str = 'manual'
+
+
+class StoryboardShotUpdate(BaseModel):
+    prompt: str | None = Field(default=None, min_length=1, max_length=10000)
+    duration: int | None = Field(default=None, ge=1, le=600)
+    actor: str = 'human'
+
+
+class StoryboardStructure(BaseModel):
+    ordered_shot_ids: list[str]
+
+
+@app.get('/api/projects/{pid}/storyboard/revisions')
+def storyboard_revisions_list(pid: str):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.list_revisions, pid)
+
+
+@app.post('/api/projects/{pid}/storyboard/revisions')
+def storyboard_revisions_create(pid: str, body: StoryboardDraftRequest | None = None):
+    from . import storyboard_revisions
+    body = body or StoryboardDraftRequest()
+    return api_call(storyboard_revisions.create_draft, pid, actor=body.actor, source=body.source)
+
+
+@app.get('/api/projects/{pid}/storyboard/revisions/{rid}')
+def storyboard_revisions_get(pid: str, rid: str):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.get, pid, rid)
+
+
+@app.patch('/api/projects/{pid}/storyboard/revisions/{rid}/shots/{shot_id}')
+def storyboard_revisions_update_shot(pid: str, rid: str, shot_id: str, body: StoryboardShotUpdate):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.update_shot, pid, rid, shot_id,
+                    prompt=body.prompt, duration=body.duration, actor=body.actor)
+
+
+@app.put('/api/projects/{pid}/storyboard/revisions/{rid}/structure')
+def storyboard_revisions_structure(pid: str, rid: str, body: StoryboardStructure):
+    from . import storyboard_revisions
+    return api_call(storyboard_revisions.reorder, pid, rid, body.ordered_shot_ids, actor='human')
+
+
+# M2: copy-on-write timeline revisions. Existing timeline/selection URLs remain;
+# these endpoints expose the revisioned timeline truth additively.
+class TimelineDraftRequest(BaseModel):
+    actor: str = 'human'
+
+
+class TimelineClipUpdate(BaseModel):
+    asset_id: str
+    source_in_us: int = Field(ge=0)
+    source_out_us: int = Field(gt=0)
+    position: int = Field(ge=1)
+    actor: str = 'human'
+
+
+class TimelineAudioClip(BaseModel):
+    kind: str
+    file: str
+    source_out_us: int = Field(gt=0)
+    source_in_us: int = Field(default=0, ge=0)
+    timeline_in_us: int = Field(default=0, ge=0)
+    timeline_out_us: int | None = Field(default=None, gt=0)
+    gain: float = Field(default=1.0, ge=0, le=3)
+    fade_in_us: int = Field(default=0, ge=0)
+    fade_out_us: int = Field(default=0, ge=0)
+    actor: str = 'human'
+
+
+class TimelineSubtitles(BaseModel):
+    srt_file: str
+    language: str | None = None
+    actor: str = 'human'
+
+
+@app.get('/api/projects/{pid}/timeline/revisions')
+def timeline_revisions_list(pid: str):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.list_revisions, pid)
+
+
+@app.post('/api/projects/{pid}/timeline/revisions')
+def timeline_revisions_create(pid: str, body: TimelineDraftRequest | None = None):
+    from . import timeline_revisions
+    body = body or TimelineDraftRequest()
+    return api_call(timeline_revisions.create_draft, pid, actor=body.actor)
+
+
+@app.get('/api/projects/{pid}/timeline/revisions/{rid}')
+def timeline_revisions_get(pid: str, rid: str):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.get, pid, rid)
+
+
+@app.patch('/api/projects/{pid}/timeline/revisions/{rid}/clips/{shot_id}')
+def timeline_revisions_update_clip(pid: str, rid: str, shot_id: str, body: TimelineClipUpdate):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.set_video_clip, pid, rid, shot_id, body.asset_id,
+                    source_in_us=body.source_in_us, source_out_us=body.source_out_us,
+                    position=body.position, actor=body.actor)
+
+
+@app.post('/api/projects/{pid}/timeline/revisions/{rid}/audio')
+def timeline_revisions_add_audio(pid: str, rid: str, body: TimelineAudioClip):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.add_audio_clip, pid, rid, kind=body.kind,
+                    file=body.file, source_in_us=body.source_in_us,
+                    source_out_us=body.source_out_us, timeline_in_us=body.timeline_in_us,
+                    timeline_out_us=body.timeline_out_us, gain=body.gain,
+                    fade_in_us=body.fade_in_us, fade_out_us=body.fade_out_us, actor=body.actor)
+
+
+@app.put('/api/projects/{pid}/timeline/revisions/{rid}/subtitles')
+def timeline_revisions_set_subtitles(pid: str, rid: str, body: TimelineSubtitles):
+    from . import timeline_revisions
+    return api_call(timeline_revisions.set_subtitles, pid, rid, body.srt_file,
+                    language=body.language, actor=body.actor)
+
+
 @app.post('/api/projects/{pid}/sync')
 def sync(pid: str):
     return api_call(timeline.sync,pid)
@@ -138,19 +265,35 @@ def start_render(pid: str, body: RenderRequest):
     checked_pid(pid)
     if body.source not in ('selected','original','i2v','mixed'):
         raise HTTPException(400,'Invalid source')
+    from . import render_snapshots
     with _render_lock:
         if any(j['status'] in ('queued','running') for j in _render_jobs.values()):
             raise HTTPException(409,'A render is already queued or running')
-        jid=uuid4().hex
+        snapshot = body.source == 'selected'
+        try:
+            jid = render_snapshots.create(pid)['id'] if snapshot else uuid4().hex
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         job={'id':jid,'project_id':pid,'status':'queued','output':None,'error':None,'created':datetime.now(timezone.utc).isoformat()}
         _render_jobs[jid]=job
     def work():
         with _render_lock: job['status']='running'
         try:
-            if body.silent_fallback and not sound._config_path(pid).is_file():
-                out=timeline.render(pid,source=body.source)
+            if snapshot:
+                result = render_snapshots.run_and_wait(pid, jid)
+                if result['status'] != 'READY':
+                    raise ValueError(result.get('error') or 'Render failed')
+                video = Path(result['output'])
+                if body.silent_fallback and not sound._config_path(pid).is_file():
+                    out = video
+                else:
+                    out = sound.export(pid, snapshot_id=jid, burn_subtitles=body.burn_subtitles,
+                                       ducking=body.ducking)
             else:
-                out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
+                if body.silent_fallback and not sound._config_path(pid).is_file():
+                    out=timeline.render(pid,source=body.source)
+                else:
+                    out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
             with _render_lock:
                 job['output']=str(out)
                 job['status']='completed'
@@ -166,8 +309,16 @@ def render_status(pid: str,jid: str):
     checked_pid(pid)
     with _render_lock:
         job=_render_jobs.get(jid)
-        if not job or job['project_id']!=pid: raise HTTPException(404,'Unknown render job')
-        return dict(job)
+        if job and job['project_id']==pid:
+            return dict(job)
+    from . import render_snapshots
+    try:
+        snap = render_snapshots.get(pid, jid)
+    except ValueError:
+        raise HTTPException(404,'Unknown render job')
+    status = {'PENDING':'queued','READY':'completed','FAILED':'failed'}[snap['status']]
+    return {'id':jid,'project_id':pid,'status':status,'output':snap.get('output'),
+            'error':snap.get('error'),'created':snap['created']}
 
 @app.get('/api/projects/{pid}/renders/{jid}/video')
 def render_video(pid: str,jid: str):

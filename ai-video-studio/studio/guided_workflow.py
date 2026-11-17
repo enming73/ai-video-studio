@@ -150,6 +150,10 @@ def confirm_storyboard(pid: str, revision: int) -> dict:
         if db.execute('SELECT 1 FROM guided_character_settings WHERE project_id=?', (pid,)).fetchone():
             from . import guided_boundaries
             guided_boundaries.ensure_for_storyboard(db, pid)
+        from . import storyboard_revisions
+        storyboard_revisions._record_decision(db, pid, node_type='storyboard', node_id=pid,
+                                              action='confirm', actor='human',
+                                              metadata={'shots': len(shots)})
     return get(pid)
 
 
@@ -170,6 +174,10 @@ def confirm_shot(pid: str, seq: int, asset_id: str, revision: int) -> dict:
             raise ValueError('Selected asset missing or changed')
         db.execute('INSERT OR REPLACE INTO guided_confirmations VALUES (?,?,?,?)', (pid, shot['id'], asset_id, shot['prompt']))
         db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+        from . import storyboard_revisions
+        storyboard_revisions._record_decision(db, pid, node_type='shot', node_id=shot['id'],
+                                              action='confirm', actor='human',
+                                              metadata={'asset_id': asset_id})
     return get(pid)
 
 
@@ -186,12 +194,19 @@ def edit_shot(pid: str, seq: int, prompt: str, revision: int) -> dict:
         if not shot:
             raise ValueError('Unknown shot')
         if prompt.strip() != shot['prompt']:
-            from . import guided_characters, guided_boundaries
+            from . import guided_characters, guided_boundaries, storyboard_revisions
             guided_characters.invalidate_shot(db, pid, shot['id'])
             guided_boundaries.invalidate_for_shot(db, pid, shot['id'])
-            db.execute('UPDATE shots SET prompt=? WHERE id=?', (prompt.strip(), shot['id']))
+            # Materialize the base revision before mutating the legacy projection,
+            # so the base revision preserves the pre-edit prompt.
+            current_rid = storyboard_revisions._ensure(db, pid)
             db.execute('DELETE FROM guided_confirmations WHERE project_id=? AND shot_id=?', (pid, shot['id']))
             db.execute('UPDATE guided_projects SET revision=revision+1 WHERE project_id=?', (pid,))
+            storyboard_revisions._update_shot(db, pid, current_rid, shot['id'],
+                                              prompt=prompt.strip(), actor='human', source='guided')
+            storyboard_revisions._record_decision(db, pid, node_type='shot', node_id=shot['id'],
+                                                  action='accept', actor='human',
+                                                  metadata={'prompt': prompt.strip()})
     return get(pid)
 
 

@@ -15,7 +15,11 @@ implementation and verification process. The roadmap is planning guidance, not a
 claim that automatic production is already implemented. The roadmap is approved;
 [M0 local acceptance tooling](docs/acceptance/m0-baseline.md) is implemented,
 automated evidence recorded and accepted by the user within its documented local
-legacy-media scope. See [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
+legacy-media scope. The M2 minimal edit model and reproducible render snapshots
+(see below) are implemented in the current branch and pending merge; automated
+evidence and known limits are recorded in
+[the M2 acceptance record](docs/acceptance/m2-edit-model.md). See
+[PROJECT_HANDOFF.md](PROJECT_HANDOFF.md) for current capabilities
 and verification limits.
 
 This repository contains Studio, VBench, and their shared provider core. The
@@ -40,6 +44,36 @@ legacy workflows and caveats below originated in v0.2.
 - `video-provider-core/`: shared MiniMax, Wan, Flux implementations and secure media downloader
 - `vbench/`: original benchmark, now importing shared providers through a compatibility module
 - `ai-video-studio/`: Studio CLI and local visual editor with cloud task persistence and mock mode
+
+## Edit model and render snapshots (M2)
+
+M2 adds a minimal revisioned edit model and reproducible render snapshots while
+keeping old projects readable, selectable, and exportable. Storyboard content is
+versioned in `storyboard_revisions`/`shot_revisions`; timeline content in
+`timeline_revisions` (video clips, audio clips, subtitles). `shots.id` stays
+stable across revisions, and `timeline_items` is now a compatibility projection
+of the current timeline revision, not the source of truth. Every edit is
+copy-on-write: old revisions are immutable and never deleted. Persisted timeline
+times are integer microseconds (`*_us`).
+
+A `RenderSnapshot` freezes the current timeline revision — video-clip and audio
+input hashes, subtitle hash, and encoding parameters — and re-exports from that
+manifest alone, so editing the project after a snapshot never changes what an
+existing snapshot produces, and re-exports never overwrite previous outputs.
+
+Dependency invalidation is scoped: changing subtitles or music only invalidates
+the mix/export, and never regenerates video; changing one shot's prompt only
+invalidates that shot. The shared readiness check is mode-independent. Guided
+mode additionally requires a `human` decision at the declared nodes; automatic
+mode accepts `system`/`human` decisions and never fabricates human confirmation.
+
+The new revision/snapshot APIs are additive; existing read/select/export URLs and
+fields are preserved. Known limits: single video track, no effects or
+transitions, no generation rewiring (M2 consumes M1-generated assets), a
+recorded `legacy_freeze` decision on the legacy asset-selection path for
+short assets, and snapshot rendering applies only to the `selected` source.
+See [the M2 acceptance record](docs/acceptance/m2-edit-model.md) for the full
+exit-condition mapping and limits.
 
 ## architecture
 [![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/enming73/ai-video-studio?utm_source=readme&utm_medium=badge)
