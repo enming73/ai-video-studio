@@ -59,6 +59,9 @@ def _domains_and_shots(db, pid, node_type, node_id):
     if node_type == 'shot':
         # prompt/duration change: asset validity + timeline/export.
         return ['video', 'export'], [node_id]
+    if node_type == 'duration':
+        # shot duration change: timeline clip window + export, not asset validity.
+        return ['export'], [node_id]
     if node_type == 'reference':
         # cast/reference change: asset validity only.
         return ['video'], [node_id]

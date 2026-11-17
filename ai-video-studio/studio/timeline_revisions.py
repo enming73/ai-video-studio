@@ -159,13 +159,20 @@ def _asset_duration_us(db, asset_id):
     return edit_model._probe_duration_us(asset['file']) or fallback
 
 
-def _validate_clips(db, clips):
+def _derive_duration_us(clips):
+    """Total timeline span implied by a contiguous clip set (0 when empty)."""
+    return max((c['timeline_out_us'] for c in clips), default=0)
+
+
+def _validate_clips(db, clips, duration_us=None):
     """Return a list of error dicts for a would-be video-clip set.
 
     ``clips`` is a list of dicts with at least ``shot_id``, ``asset_id``,
     ``position``, ``source_in_us``, ``source_out_us``, ``timeline_in_us`` and
     ``timeline_out_us``. Checks missing assets, source overflow, duration
-    consistency, and positional gaps/overlaps.
+    consistency, and positional gaps/overlaps. When ``duration_us`` is given it
+    must equal the derived clip span (max ``timeline_out_us``), so a revision
+    whose stored ``duration_us`` disagrees with its clips is flagged.
     """
     errors = []
     for c in clips:
@@ -204,6 +211,11 @@ def _validate_clips(db, clips):
     if ordered and ordered[0]['timeline_in_us'] > 0:
         errors.append({'type': 'gap', 'shot_id': ordered[0]['shot_id'],
                        'message': 'gap at start of timeline'})
+    if duration_us is not None:
+        derived = _derive_duration_us(clips)
+        if duration_us != derived:
+            errors.append({'type': 'invalid_duration', 'shot_id': None,
+                           'message': f'duration_us {duration_us} != clip span {derived}'})
     return errors
 
 
@@ -211,11 +223,11 @@ def validate(pid, revision_id, db=None):
     """Return validation errors for ``revision_id`` (empty list when valid)."""
     db, own = _connect(db)
     try:
-        _timeline(db, pid, revision_id)
+        tl = _timeline(db, pid, revision_id)
         clips = [dict(r) for r in db.execute(
             'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=?',
             (revision_id,)).fetchall()]
-        return _validate_clips(db, clips)
+        return _validate_clips(db, clips, duration_us=tl['duration_us'])
     finally:
         if own:
             db.commit()
@@ -280,6 +292,8 @@ def set_video_clip(pid, revision_id, shot_id, asset_id, *, source_in_us, source_
         new_id = _clone(db, pid, revision_id, source=source, actor=actor)
         _set_clip_in_revision(db, new_id, shot_id, asset_id, source_in_us, source_out_us,
                               position, timeline_in_us, timeline_out_us)
+        db.execute('UPDATE timeline_revisions SET duration_us=? WHERE id=?',
+                   (_derive_duration_us(would_be), new_id))
         _promote(db, pid, new_id)
         from . import edit_readiness
         edit_readiness.invalidate(pid, node_type='clip', node_id=shot_id,
@@ -461,6 +475,92 @@ def sync_audio_subtitles(pid, *, actor='human', db=None):
         edit_readiness.invalidate(pid, node_type='subtitle', node_id=pid,
                                   reason='subtitles changed', db=db)
         return _get(db, pid, new_id, ensure=False)
+    finally:
+        if own:
+            db.commit()
+
+
+def _derive_from_storyboard(db, pid, *, actor='human'):
+    """Derive a new timeline revision matching the current storyboard revision.
+
+    Reorders video clips to the new shot order and resizes each clip's window
+    to the shot's current duration, preserving source ranges where they still
+    fit the asset. Invalid geometry (a window longer than the selected asset)
+    is recorded as a ``legacy_freeze`` decision. Audio clips and subtitles are
+    copied verbatim from the previous timeline revision. ``duration_us`` is
+    recomputed from the derived clip set.
+    """
+    state = edit_model._current(db, pid)
+    sb_id = state['storyboard_revision_id']
+    shots = db.execute(
+        'SELECT * FROM shot_revisions WHERE storyboard_revision_id=? ORDER BY seq',
+        (sb_id,)).fetchall()
+    cur_tl_id = state['timeline_revision_id']
+    cur = _timeline(db, pid, cur_tl_id)
+    cur_clips = {c['shot_id']: dict(c) for c in db.execute(
+        'SELECT * FROM timeline_video_clips WHERE timeline_revision_id=?',
+        (cur_tl_id,)).fetchall()}
+
+    source = 'manual' if actor == 'human' else 'automatic'
+    new_id = uuid4().hex
+    db.execute(
+        'INSERT INTO timeline_revisions(id,project_id,storyboard_revision_id,revision_no,fps,duration_us,source,actor,created) '
+        'VALUES (?,?,?,?,?,?,?,?,?)',
+        (new_id, pid, sb_id, _next_revision_no(db, pid), cur['fps'], 0,
+         source, actor, core.now()))
+
+    for clip in db.execute(
+            'SELECT * FROM timeline_audio_clips WHERE timeline_revision_id=?',
+            (cur_tl_id,)).fetchall():
+        db.execute(
+            'INSERT INTO timeline_audio_clips(id,timeline_revision_id,kind,file,sha256,'
+            'source_in_us,source_out_us,timeline_in_us,timeline_out_us,gain,fade_in_us,fade_out_us,created) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (uuid4().hex, new_id, clip['kind'], clip['file'], clip['sha256'],
+             clip['source_in_us'], clip['source_out_us'], clip['timeline_in_us'],
+             clip['timeline_out_us'], clip['gain'], clip['fade_in_us'], clip['fade_out_us'],
+             core.now()))
+    for sub in db.execute(
+            'SELECT * FROM subtitle_revisions WHERE timeline_revision_id=?',
+            (cur_tl_id,)).fetchall():
+        db.execute(
+            'INSERT INTO subtitle_revisions(id,timeline_revision_id,srt_file,sha256,language,created) '
+            'VALUES (?,?,?,?,?,?)',
+            (uuid4().hex, new_id, sub['srt_file'], sub['sha256'], sub['language'], core.now()))
+
+    offset = 0
+    for s in shots:
+        old = cur_clips.get(s['shot_id'])
+        if old is None:
+            continue
+        asset_id = old['asset_id']
+        source_in_us = old['source_in_us']
+        window_us = s['duration'] * MICRO
+        source_out_us = source_in_us + window_us
+        asset_dur = _asset_duration_us(db, asset_id)
+        if asset_dur is not None and source_out_us > asset_dur:
+            _record_legacy_freeze(db, pid, s['shot_id'], asset_id, window_us, asset_dur)
+        timeline_in_us = offset
+        timeline_out_us = offset + window_us
+        db.execute(
+            'INSERT INTO timeline_video_clips(id,timeline_revision_id,shot_id,asset_id,position,'
+            'source_in_us,source_out_us,timeline_in_us,timeline_out_us,created) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?)',
+            (uuid4().hex, new_id, s['shot_id'], asset_id, s['seq'],
+             source_in_us, source_out_us, timeline_in_us, timeline_out_us, core.now()))
+        offset = timeline_out_us
+    db.execute('UPDATE timeline_revisions SET duration_us=? WHERE id=?', (offset, new_id))
+    _promote(db, pid, new_id)
+    edit_model._sync_legacy_projection(db, pid)
+    return new_id
+
+
+def derive_from_storyboard(pid, *, actor='human', db=None):
+    """Public entry point: derive a timeline revision from the current storyboard."""
+    db, own = _connect(db)
+    try:
+        _ensure(db, pid)
+        return _derive_from_storyboard(db, pid, actor=actor)
     finally:
         if own:
             db.commit()

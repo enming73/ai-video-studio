@@ -1,9 +1,11 @@
 """Task 5: reproducible render snapshots and the local_render job."""
+import json
 import shutil
+import subprocess
 
 import pytest
 
-from studio import core, edit_model, render_snapshots, timeline, timeline_revisions
+from studio import core, edit_model, render_snapshots, sound, timeline, timeline_revisions
 
 
 @pytest.fixture
@@ -180,3 +182,89 @@ def test_record_history_is_idempotent(snapshot_project):
         count = db.execute('SELECT COUNT(*) FROM render_history WHERE id=?',
                            (snap['id'],)).fetchone()[0]
     assert count == 1
+
+
+def test_trim_last_clip_recomputes_duration_and_renders(snapshot_project):
+    """Trimming the last clip must recompute ``duration_us`` and still render.
+
+    Regression: ``set_video_clip`` rewrote clip windows but left the timeline
+    revision's ``duration_us`` at the old total, so trimming the final clip made
+    ``local_render`` fail with ``Invalid clip duration``.
+    """
+    pid, rid, _other_srt = snapshot_project
+    clips = timeline_revisions.current(pid)['video_clips']
+    last = clips[-1]
+    new = timeline_revisions.set_video_clip(
+        pid, rid, last['shot_id'], last['asset_id'],
+        source_in_us=0, source_out_us=1_000_000, position=last['position'])
+    assert new['duration_us'] == 4_000_000  # 3s + 1s (was 6s)
+    assert timeline_revisions.validate(pid, new['id']) == []
+    out = timeline.render(pid, source='selected')
+    assert out.is_file()
+    core.verify_video(out, 4)
+
+
+def test_subtitle_edit_via_revision_api_reaches_mix(snapshot_project):
+    """A subtitle set via the revision API (not ``sound.configure``) must reach
+    the burn. Regression: ``sound.export`` read ``soundtrack.json``, which the
+    revision API never updates, so the subtitle was never burned."""
+    pid, _rid, _other_srt = snapshot_project
+    snap = render_snapshots.create(pid, actor='human')
+    render_snapshots.run_and_wait(pid, snap['id'])
+    out = sound.export(pid, burn_subtitles=True, snapshot_id=snap['id'])
+    assert out.is_file()
+    assert abs(sound._probe(out) - 6) < 0.5
+    sidecar = json.loads(out.with_suffix('.json').read_text())
+    assert sidecar['burn_subtitles'] is True
+    assert sidecar['subtitle']['sha256'] == snap['manifest']['subtitle']['sha256']
+    assert sidecar['subtitle']['srt_file'].endswith('captions.srt')
+
+
+def _real_wav(root):
+    wav = root / 'voice.wav'
+    subprocess.run(['ffmpeg', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+                    'sine=frequency=440:duration=2', '-c:a', 'pcm_s16le', str(wav)],
+                   check=True)
+    return wav
+
+
+def test_audio_edit_via_revision_api_reaches_mix(snapshot_project):
+    """An audio clip added via the revision API must reach the mix."""
+    pid, rid, _other_srt = snapshot_project
+    wav = _real_wav(core.HOME / pid)
+    rid = timeline_revisions.add_audio_clip(
+        pid, rid, kind='sfx', file=str(wav), source_out_us=2_000_000,
+        timeline_in_us=0, gain=0.5, actor='human')['id']
+    snap = render_snapshots.create(pid, actor='human')
+    render_snapshots.run_and_wait(pid, snap['id'])
+    assert snap['manifest']['audio_clips'][-1]['sha256'] == edit_model._hash_file(str(wav))
+    out = sound.export(pid, snapshot_id=snap['id'])
+    assert out.is_file()
+    sidecar = json.loads(out.with_suffix('.json').read_text())
+    assert any(c['sha256'] == edit_model._hash_file(str(wav))
+               for c in sidecar['audio_clips'])
+
+
+def test_snapshot_mix_verifies_frozen_audio_hash(snapshot_project):
+    """A file changed after the snapshot is refused at mix time, not silently used."""
+    pid, rid, _other_srt = snapshot_project
+    wav = _real_wav(core.HOME / pid)
+    rid = timeline_revisions.add_audio_clip(
+        pid, rid, kind='sfx', file=str(wav), source_out_us=2_000_000)['id']
+    snap = render_snapshots.create(pid, actor='human')
+    render_snapshots.run_and_wait(pid, snap['id'])
+    wav.write_bytes(b'corrupted-after-snapshot')
+    with pytest.raises(ValueError, match='changed since snapshot'):
+        sound.export(pid, snapshot_id=snap['id'])
+
+
+def test_later_audio_edit_does_not_change_existing_snapshot(snapshot_project):
+    """An existing snapshot's frozen audio clips are unaffected by later edits."""
+    pid, rid, _other_srt = snapshot_project
+    first = render_snapshots.create(pid, actor='human')
+    frozen = first['manifest']['audio_clips']
+    audio = core.HOME / pid / 'voice.wav'
+    audio.write_bytes(b'fake-audio')
+    timeline_revisions.add_audio_clip(pid, rid, kind='sfx', file=str(audio),
+                                      source_out_us=2_000_000)
+    assert render_snapshots.get(pid, first['id'])['manifest']['audio_clips'] == frozen

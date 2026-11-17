@@ -231,9 +231,14 @@ def _update_shot(db, pid, revision_id, shot_id, *, prompt=None, duration=None,
         db.execute('UPDATE shots SET prompt=?, duration=? WHERE id=?',
                    (new_prompt, new_duration, shot_id))
         from . import edit_readiness
-        edit_readiness.invalidate(pid, node_type='shot', node_id=shot_id,
-                                  reason='shot content changed (' + ', '.join(updates) + ')',
-                                  db=db)
+        if 'prompt' in updates:
+            edit_readiness.invalidate(pid, node_type='shot', node_id=shot_id,
+                                      reason='shot prompt changed', db=db)
+        if 'duration' in updates:
+            edit_readiness.invalidate(pid, node_type='duration', node_id=shot_id,
+                                      reason='shot duration changed', db=db)
+            from . import timeline_revisions
+            timeline_revisions._derive_from_storyboard(db, pid, actor=actor)
     return _get(db, pid, new_id, ensure=False)
 
 
@@ -278,6 +283,8 @@ def reorder(pid, revision_id, ordered_shot_ids, *, actor='human', db=None):
             from . import edit_readiness
             edit_readiness.invalidate(pid, node_type='storyboard', node_id=pid,
                                       reason='shot order changed', db=db)
+        from . import timeline_revisions
+        timeline_revisions._derive_from_storyboard(db, pid, actor=actor)
         return _get(db, pid, new_id, ensure=False)
     finally:
         if own:

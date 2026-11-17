@@ -1,5 +1,6 @@
 """v0.6 non-destructive audio, subtitles and final export. No paid API calls."""
 from __future__ import annotations
+import hashlib
 import json
 import os
 import shutil
@@ -174,6 +175,122 @@ def _subtitle_filter(path):
     return "subtitles=filename='"+value+"':force_style='FontName="+font+",FontSize="+str(size)+",Outline=2,Shadow=1'"
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verified(path, sha256):
+    """Validate a media file exists and matches its frozen ``sha256``.
+
+    An empty/missing hash skips the digest check (legacy inputs without a hash).
+    """
+    p = _valid_file(path)
+    if sha256 and _sha256(p) != sha256:
+        raise ValueError(f'File changed since snapshot: {p}')
+    return p
+
+
+def _mix_snapshot(pid, source_video, manifest, output, burn_subtitles, ducking):
+    """Mix audio/subtitles from a frozen snapshot manifest, verifying input hashes.
+
+    Consumes ``manifest['audio_clips']`` (per-clip kind/file/sha256/timing/gain/
+    fades) and ``manifest['subtitle']`` directly, and verifies each input's
+    sha256 so a file changed after the snapshot is refused rather than silently
+    mixed. This is the snapshot path of ``export``; the legacy config/events
+    path in ``_mix`` is unchanged.
+    """
+    duration = manifest['duration_us'] / 1_000_000.0
+    root = core.HOME / pid
+    out = Path(output).expanduser().resolve() if output else root / f'final-sound-{uuid.uuid4().hex[:8]}.mp4'
+    if out.exists(): raise ValueError(f'Output exists; refusing overwrite: {out}')
+    if out == source_video: raise ValueError('Output must differ from source video')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    inputs = ['-i', str(source_video)]
+    filters = []
+    audio_labels = []
+    idx = 1
+    narration_label = None
+    music_label = None
+    for clip in manifest.get('audio_clips') or []:
+        path = _verified(clip['file'], clip.get('sha256'))
+        inputs += ['-i', str(path)]
+        source_in = (clip.get('source_in_us') or 0) / 1_000_000.0
+        length = ((clip.get('source_out_us') or clip.get('timeline_out_us') or 0)
+                  - (clip.get('source_in_us') or 0)) / 1_000_000.0
+        at = (clip.get('timeline_in_us') or 0) / 1_000_000.0
+        gain = float(clip.get('gain', 1.0))
+        fade_in = (clip.get('fade_in_us') or 0) / 1_000_000.0
+        fade_out = (clip.get('fade_out_us') or 0) / 1_000_000.0
+        if not 0 <= gain <= 3:
+            raise ValueError(f'Invalid audio gain: {clip["file"]}')
+        if length <= 0:
+            raise ValueError(f'Invalid audio clip length: {clip["file"]}')
+        af = (f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,volume={gain},'
+              f'atrim=start={source_in}:duration={length},asetpts=PTS-STARTPTS')
+        if fade_in:
+            af += f',afade=t=in:st=0:d={fade_in}'
+        if fade_out:
+            af += f',afade=t=out:st={max(0.0, length - fade_out)}:d={fade_out}'
+        label = f'a{idx}'
+        af += f',adelay={round(at * 1000)}:all=1[{label}]'
+        filters.append(af)
+        audio_labels.append(f'[{label}]')
+        if clip['kind'] == 'narration':
+            narration_label = label
+        elif clip['kind'] == 'music':
+            music_label = label
+        idx += 1
+    if ducking and narration_label and music_label:
+        filters.append(f'[{narration_label}]asplit=2[narration_main][narration_side]')
+        filters.append(f'[{music_label}][narration_side]sidechaincompress='
+                       f'threshold=0.03:ratio=8:attack=25:release=400[music_ducked]')
+        audio_labels = [l for l in audio_labels
+                        if l not in (f'[{narration_label}]', f'[{music_label}]')]
+        audio_labels += ['[narration_main]', '[music_ducked]']
+    if audio_labels:
+        if len(audio_labels) > 1:
+            filters.append(''.join(audio_labels) +
+                           f'amix=inputs={len(audio_labels)}:duration=longest:normalize=0,'
+                           f'atrim=duration={duration}[audio]')
+        else:
+            filters.append(f'{audio_labels[0]}anull[audio]')
+    else:
+        filters.append(f'anullsrc=r=48000:cl=stereo,atrim=duration={duration}[audio]')
+    args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n', *inputs]
+    if burn_subtitles:
+        sub = manifest.get('subtitle')
+        if not sub:
+            raise ValueError('No .srt subtitles configured')
+        sub_path = _verified(sub['srt_file'], sub.get('sha256'))
+        args += ['-vf', _subtitle_filter(sub_path), '-c:v', 'libx264',
+                 '-preset', 'veryfast', '-pix_fmt', 'yuv420p']
+    else:
+        args += ['-c:v', 'copy']
+    args += ['-filter_complex', ';'.join(filters), '-map', '0:v:0', '-map', '[audio]',
+             '-c:a', 'aac', '-b:a', '192k', '-t', str(duration), '-movflags', '+faststart', str(out)]
+    try:
+        core.run(args)
+        if abs(_probe(out) - duration) > 0.5:
+            raise RuntimeError('Unexpected output duration')
+        manifest_out = {'project_id': pid, 'video': str(source_video), 'output': str(out),
+                        'config': manifest.get('config') or {},
+                        'audio_events': manifest.get('audio_events') or [],
+                        'audio_clips': manifest.get('audio_clips') or [],
+                        'subtitle': manifest.get('subtitle'),
+                        'ducking': ducking, 'burn_subtitles': burn_subtitles,
+                        'duration': duration}
+        out.with_suffix('.json').write_text(json.dumps(manifest_out, indent=2,
+                                                       ensure_ascii=False), encoding='utf-8')
+        return out
+    except Exception:
+        out.unlink(missing_ok=True)
+        raise
+
+
 def export(pid, video=None, output=None, source='selected', burn_subtitles=False,
            ducking=False, snapshot_id=None):
     """Export a mixed film from a reproducible snapshot (or a legacy source).
@@ -207,11 +324,8 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
             if snap['status'] != 'READY':
                 raise ValueError(snap.get('error') or 'Render failed')
         source_video = _valid_file(snap['output'])
-        manifest = snap['manifest']
-        cfg = manifest.get('config') or {}
-        events = manifest.get('audio_events') or []
-        return _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking,
-                    duration=manifest['duration_us'] / 1_000_000.0)
+        return _mix_snapshot(pid, source_video, snap['manifest'], output,
+                             burn_subtitles, ducking)
     return _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking)
 
 

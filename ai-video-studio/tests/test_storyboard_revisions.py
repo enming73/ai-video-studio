@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from studio import core, edit_model, guided_workflow as workflow, storyboard_revisions, timeline_revisions, webapp
+from studio import core, edit_model, guided_workflow as workflow, storyboard_revisions, timeline, timeline_revisions, webapp
 
 
 @pytest.fixture
@@ -197,3 +197,57 @@ def test_guided_and_automatic_share_revision_truth(guided_project, automatic_pro
         assert current['timeline_revision_id']
         assert storyboard_revisions.get(pid, current['storyboard_revision_id'])
         assert timeline_revisions.get(pid, current['timeline_revision_id'])
+
+
+@pytest.fixture
+def renderable_storyboard(tmp_path, monkeypatch):
+    """Two 3-second shots with real mock clips, selected and materialized.
+
+    ``timeline.render(source='selected')`` works against this fixture because
+    the clips are real FFmpeg media and the shots are not stale.
+    """
+    monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
+    pid = core.create('Reorder render', 6, 'mock', 0)
+    core.plan(pid, 3)
+    core.generate(pid)
+    timeline.sync(pid)
+    edit_model.ensure_legacy_revisions(pid)
+    return pid
+
+
+def test_reorder_propagates_to_timeline_then_renders(renderable_storyboard):
+    """Reordering shots must derive a reordered timeline revision and still render."""
+    pid = renderable_storyboard
+    before = timeline_revisions.current(pid)
+    order = [c['shot_id'] for c in before['video_clips']]
+    assert len(order) == 2
+    sb = storyboard_revisions.current(pid)
+    storyboard_revisions.reorder(pid, sb['id'], list(reversed(order)), actor='human')
+    after = timeline_revisions.current(pid)
+    assert after['id'] != before['id']
+    assert [c['shot_id'] for c in after['video_clips']] == list(reversed(order))
+    assert [c['timeline_in_us'] for c in after['video_clips']] == [0, 3_000_000]
+    assert after['duration_us'] == before['duration_us'] == 6_000_000
+    out = timeline.render(pid, source='selected')
+    assert out.is_file()
+    core.verify_video(out, 6)
+
+
+def test_duration_change_propagates_to_timeline_then_renders(renderable_storyboard):
+    """Changing a shot's duration must resize its clip window and still render."""
+    pid = renderable_storyboard
+    before = timeline_revisions.current(pid)
+    shot2 = before['video_clips'][-1]['shot_id']
+    sb = storyboard_revisions.current(pid)
+    storyboard_revisions.update_shot(pid, sb['id'], shot2, duration=2, actor='human')
+    after = timeline_revisions.current(pid)
+    assert after['id'] != before['id']
+    assert [c['shot_id'] for c in after['video_clips']] == \
+        [c['shot_id'] for c in before['video_clips']]
+    assert (after['video_clips'][-1]['timeline_out_us']
+            - after['video_clips'][-1]['timeline_in_us']) == 2_000_000
+    assert after['duration_us'] == 5_000_000  # 3s + 2s
+    assert timeline_revisions.validate(pid, after['id']) == []
+    out = timeline.render(pid, source='selected')
+    assert out.is_file()
+    core.verify_video(out, 5)
