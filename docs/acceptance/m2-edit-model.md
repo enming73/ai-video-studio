@@ -1,6 +1,6 @@
 # M2：最小编辑模型与可复现快照验收记录
 
-日期：2026-11-17。状态：**已实现于本分支，待合并与用户验收**。自动化证据来自当前分支 `7306e65`（Task 6 文档与交叉回归之前为 552 项，Task 6 新增交叉回归测试后见 §2）。M2 测试全部使用本地媒体与 fake provider，不调用真实付费 API。
+日期：2026-11-17。状态：**已验收（用户于 2026-11-17 确认）**。用户同时接受 `legacy_freeze` 作为退出条件 5 的解释，并接受 `_mix_snapshot` 不再沿用旧 `stream_loop`/`fade_seconds` 的已知限制。自动化证据来自分支 `1589489`：Studio 563 项、VBench 8 项通过。M2 测试全部使用本地媒体与 fake provider，不调用真实付费 API。
 
 本记录覆盖 M2.1（storyboard/scene/shot 版本）、M2.2（timeline v1）、M2.3（RenderSnapshot 与 `local_render` Job）、M2.4（依赖失效与就绪策略），以及 automatic/guided 决策策略与 legacy 兼容。M2 不重接视频生成流水线。
 

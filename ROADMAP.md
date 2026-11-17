@@ -120,7 +120,7 @@ M1-E3（导演/连续性视觉评审 Job）已完成并合并（PR #19，merge `
 
 ## M2 — 最小编辑模型与可复现快照
 
-**状态：已实现于本分支，待合并与验收。依赖：M1。自动化证据见 [M2 验收记录](docs/acceptance/m2-edit-model.md)。**
+**状态：已验收（2026-11-17，用户确认）。依赖：M1。自动化证据见 [M2 验收记录](docs/acceptance/m2-edit-model.md)。**
 
 工作包：
 
@@ -132,7 +132,7 @@ M1-E3（导演/连续性视觉评审 Job）已完成并合并（PR #19，merge `
 
 主要落点：`studio/core.py`、`guided_structure.py`、`guided_workflow.py`、`guided_characters.py`、`guided_boundaries.py`、`timeline.py`、`sound.py`、`narration.py`，及其迁移与测试。
 
-进展：M2.1（schema + 惰性 legacy 物化）、M2.2（timeline v1 + 兼容投影）、M2.3（RenderSnapshot + `local_render` Job）、M2.4（依赖失效/就绪策略）与 automatic/guided 共享 revision 真相均已实现于本分支，并经过逐任务评审与修复（commit `122c029`..`7306e65`）。Studio 553 项、VBench 8 项测试通过，前端生产构建通过。M2 不重接视频生成流水线。
+进展：M2.1（schema + 惰性 legacy 物化）、M2.2（timeline v1 + 兼容投影）、M2.3（RenderSnapshot + `local_render` Job）、M2.4（依赖失效/就绪策略）与 automatic/guided 共享 revision 真相均已实现并验收（commit `122c029`..`1589489`）。Studio 563 项、VBench 8 项测试通过，前端生产构建通过。M2 不重接视频生成流水线。
 
 退出条件：
 
