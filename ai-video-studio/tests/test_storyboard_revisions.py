@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from studio import core, guided_workflow as workflow, storyboard_revisions, webapp
+from studio import core, edit_model, guided_workflow as workflow, storyboard_revisions, timeline_revisions, webapp
 
 
 @pytest.fixture
@@ -155,3 +155,45 @@ def test_guided_confirmation_backfills_human_decision(api, guided_storyboard):
     decisions = storyboard_revisions.current(pid)['decisions']
     assert any(d['node_type'] == 'shot' and d['node_id'] == shot['id']
                and d['action'] == 'confirm' and d['actor'] == 'human' for d in decisions)
+
+
+@pytest.fixture
+def automatic_project(tmp_path, monkeypatch):
+    """A non-guided project whose legacy revision is materialized."""
+    monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
+    pid = core.create('Automatic revision truth', 20, 'mock', 0)
+    core.plan(pid, 10)
+    edit_model.ensure_legacy_revisions(pid)
+    return pid
+
+
+@pytest.fixture
+def guided_project(tmp_path, monkeypatch):
+    """A guided project with a confirmed storyboard and materialized revision."""
+    from studio import guided_characters
+    monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
+    pid = core.create('Guided revision truth', 20, 'mock', 0)
+    workflow.create(pid, character_stage_enabled=True)
+    state = guided_characters.confirm_empty_cast(pid, 0)
+    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
+        {'prompt': 'An elephant walks through the forest.', 'duration': 8, 'character_ids': []},
+        {'prompt': 'An elephant reaches the river.', 'duration': 12, 'character_ids': []}]},
+        state['revision'])
+    state = workflow.confirm_storyboard(pid, state['revision'])
+    edit_model.ensure_legacy_revisions(pid)
+    return pid
+
+
+def test_guided_and_automatic_share_revision_truth(guided_project, automatic_project):
+    """Both production modes resolve the same shared revision-truth interfaces.
+
+    Regression: ``edit_model.current`` must return non-empty storyboard and
+    timeline revision ids for guided and automatic projects alike, and both
+    revision stores must be able to read the current revision back.
+    """
+    for pid in (guided_project, automatic_project):
+        current = edit_model.current(pid)
+        assert current['storyboard_revision_id']
+        assert current['timeline_revision_id']
+        assert storyboard_revisions.get(pid, current['storyboard_revision_id'])
+        assert timeline_revisions.get(pid, current['timeline_revision_id'])
