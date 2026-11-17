@@ -153,12 +153,15 @@ def _ensure_legacy_revisions(db, pid: str) -> dict:
     _materialize_audio_clips(db, pid, tl_id)
     _materialize_subtitles(db, pid, tl_id)
 
+    # Only fill a pointer when it is NULL/missing. Existing copy-on-write
+    # revisions must never be clobbered back to the legacy revision by a later
+    # ensure_legacy_revisions call.
     db.execute(
         'INSERT INTO project_state(project_id,current_storyboard_revision_id,current_timeline_revision_id,updated) '
         'VALUES (?,?,?,?) '
         'ON CONFLICT(project_id) DO UPDATE SET '
-        'current_storyboard_revision_id=excluded.current_storyboard_revision_id, '
-        'current_timeline_revision_id=excluded.current_timeline_revision_id, '
+        'current_storyboard_revision_id=COALESCE(project_state.current_storyboard_revision_id, excluded.current_storyboard_revision_id), '
+        'current_timeline_revision_id=COALESCE(project_state.current_timeline_revision_id, excluded.current_timeline_revision_id), '
         'updated=excluded.updated',
         (pid, sb_id, tl_id, _now()))
 

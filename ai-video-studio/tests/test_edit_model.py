@@ -88,3 +88,31 @@ def test_sync_legacy_projection_matches_current_clips(legacy_project):
             'WHERE project_id=? ORDER BY position', (pid,)).fetchall()
     assert [i['shot_id'] for i in items] == shot_ids
     assert set(i['asset_id'] for i in items) == set(asset_ids)
+
+
+def test_ensure_legacy_revisions_preserves_newer_pointers(legacy_project):
+    """Re-running ensure_legacy_revisions must not clobber copy-on-write pointers.
+
+    Regression for the Task 2 review ruling: ``_ensure_legacy_revisions`` used
+    ``ON CONFLICT DO UPDATE`` unconditionally, resetting both current pointers
+    back to the legacy revision. It must only fill NULL/missing pointers.
+    """
+    from studio import storyboard_revisions
+    pid, shot_ids, asset_ids = legacy_project
+    legacy = edit_model.ensure_legacy_revisions(pid)
+    # Advance the storyboard pointer via a copy-on-write draft.
+    draft = storyboard_revisions.create_draft(pid, actor='human')
+    assert draft['id'] != legacy['storyboard_revision_id']
+    # Advance the timeline pointer to a newer revision directly.
+    with core.connect() as db:
+        db.execute(
+            'INSERT INTO timeline_revisions(id,project_id,storyboard_revision_id,'
+            'revision_no,fps,duration_us,source,actor,created) '
+            'VALUES (?,?,?,2,24,?,?,?,?)',
+            ('tl-newer', pid, draft['id'], 20 * 1_000_000, 'manual', 'human', core.now()))
+        db.execute('UPDATE project_state SET current_timeline_revision_id=? WHERE project_id=?',
+                   ('tl-newer', pid))
+    edit_model.ensure_legacy_revisions(pid)
+    current = edit_model.current(pid)
+    assert current['storyboard_revision_id'] == draft['id']
+    assert current['timeline_revision_id'] == 'tl-newer'
