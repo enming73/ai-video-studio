@@ -148,3 +148,65 @@ def test_require_ready_raises_listing_blockers_and_passes(readiness_project):
     storyboard_revisions.record_decision(
         pid, node_type='shot', node_id=shot_ids[1], action='accept', actor='system')
     edit_readiness.require_ready(pid, mode='automatic')
+
+
+def test_legacy_stale_shot_marks_shot_stale(readiness_project):
+    """An unresolved guided_stale_shots keep decision must read as video-stale."""
+    pid, shot_ids, asset_ids = readiness_project
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_stale_shots(project_id,shot_id,keep_asset_id) '
+                   'VALUES (?,?,NULL)', (pid, shot_ids[0]))
+    status = edit_readiness.status(pid, mode='guided')
+    by_id = {s['shot_id']: s for s in status['shots']}
+    assert by_id[shot_ids[0]]['status'] == 'stale'
+    assert any('keep_old' in r for r in by_id[shot_ids[0]]['reasons'])
+    assert by_id[shot_ids[1]]['status'] == 'valid'
+    assert status['video_stale'] is True
+
+
+def test_resolved_legacy_stale_shot_is_not_stale(readiness_project):
+    """A keep decision that matches the selected asset resolves legacy staleness."""
+    pid, shot_ids, asset_ids = readiness_project
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_stale_shots(project_id,shot_id,keep_asset_id) '
+                   'VALUES (?,?,?)', (pid, shot_ids[0], asset_ids[shot_ids[0]]))
+    status = edit_readiness.status(pid, mode='guided')
+    by_id = {s['shot_id']: s for s in status['shots']}
+    assert by_id[shot_ids[0]]['status'] == 'valid'
+
+
+def test_stale_boundary_frame_marks_adjacent_shots_stale(readiness_project):
+    """A confirmed boundary frame marked stale invalidates its adjacent shots."""
+    pid, shot_ids, asset_ids = readiness_project
+    with core.connect() as db:
+        db.execute('INSERT INTO guided_boundaries(id,project_id,position,'
+                   'confirmed_image_id,active,created) VALUES (?,?,?,?,?,?)',
+                   ('b-0001', pid, 1, 'v-0001', 1, core.now()))
+        db.execute('INSERT INTO guided_boundary_versions(id,project_id,boundary_id,'
+                   'file,sha256,stale,created) VALUES (?,?,?,?,?,?,?)',
+                   ('v-0001', pid, 'b-0001', 'x.png', 's', 1, core.now()))
+    status = edit_readiness.status(pid, mode='guided')
+    by_id = {s['shot_id']: s for s in status['shots']}
+    assert by_id[shot_ids[0]]['status'] == 'stale'
+    assert by_id[shot_ids[1]]['status'] == 'stale'
+    assert status['video_stale'] is True
+
+
+def test_guided_structure_change_invalidates_export(tmp_path, monkeypatch):
+    """guided_structure.apply mutates structure; readiness must flag export."""
+    from studio import guided_structure, guided_workflow, guided_characters
+    monkeypatch.setattr(core, 'HOME', tmp_path)
+    pid = core.create('Elephant in forest', 20, 'mock', 0)
+    guided_workflow.create(pid, character_stage_enabled=True)
+    state = guided_characters.confirm_empty_cast(pid, 0)
+    state = guided_workflow.save_draft(pid, {'character_bible': {}, 'shots': [
+        {'prompt': 'An elephant walks.', 'duration': 6, 'character_ids': []},
+        {'prompt': 'An elephant drinks.', 'duration': 6, 'character_ids': []},
+        {'prompt': 'An elephant sleeps.', 'duration': 8, 'character_ids': []}]},
+        state['revision'])
+    state = guided_workflow.confirm_storyboard(pid, state['revision'])
+    shots = [{'id': s['id'], 'prompt': s['prompt'], 'duration': s['duration'],
+              'character_ids': []} for s in state['shots']]
+    guided_structure.apply(pid, shots, guided_workflow.get(pid)['revision'])
+    status = edit_readiness.status(pid, mode='guided')
+    assert status['export_stale'] is True

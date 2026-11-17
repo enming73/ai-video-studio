@@ -113,6 +113,58 @@ def invalidate(pid, *, node_type, node_id, reason, db=None):
             db.commit()
 
 
+def _legacy_stale_map(db, pid, clips):
+    """Legacy guided staleness that the decision ledger does not capture.
+
+    ``clips`` maps ``shot_id`` to the current timeline video clip (or is empty).
+    Returns ``{shot_id: [reason, ...]}`` for shots whose legacy guided state is
+    stale:
+
+    * an unresolved ``guided_stale_shots`` keep decision (``keep_asset_id``
+      missing or different from the selected asset), mirroring
+      ``guided_characters.require_render_ready``;
+    * a confirmed boundary frame whose version is marked ``stale`` (the
+      adjacent shots);
+    * a confirmed shot first frame whose version is marked ``stale``.
+
+    These are the legacy invalidation paths (character/shot/boundary edits)
+    that predate the M2 decision ledger and must still block rendering.
+    """
+    stale: dict[str, list[str]] = {}
+
+    def add(shot_id, reason):
+        stale.setdefault(shot_id, []).append(reason)
+
+    rows = db.execute(
+        'SELECT shot_id, keep_asset_id FROM guided_stale_shots WHERE project_id=?',
+        (pid,)).fetchall()
+    for r in rows:
+        selected = clips.get(r['shot_id'])
+        if selected is None:
+            continue
+        if r['keep_asset_id'] is None or r['keep_asset_id'] != selected['asset_id']:
+            add(r['shot_id'], 'legacy stale shot (undecided keep_old)')
+
+    shot_seqs = {r['id']: r['seq'] for r in db.execute(
+        'SELECT id, seq FROM shots WHERE project_id=? AND archived=0', (pid,)).fetchall()}
+    boundary_rows = db.execute(
+        'SELECT b.position FROM guided_boundaries b '
+        'JOIN guided_boundary_versions v ON v.id=b.confirmed_image_id '
+        'WHERE b.project_id=? AND b.active=1 AND v.stale=1', (pid,)).fetchall()
+    for r in boundary_rows:
+        position = r['position']
+        for shot_id, seq in shot_seqs.items():
+            if position in (seq - 1, seq):
+                add(shot_id, 'stale boundary frame')
+    frame_rows = db.execute(
+        'SELECT s.shot_id FROM guided_frame_selection s '
+        'JOIN guided_frame_versions v ON v.id=s.confirmed_frame_id '
+        'WHERE s.project_id=? AND v.stale=1', (pid,)).fetchall()
+    for r in frame_rows:
+        add(r['shot_id'], 'stale shot frame')
+    return stale
+
+
 def _replay(decisions, mode):
     """Replay the decision ledger into current per-shot video state and reasons."""
     from . import storyboard_revisions  # noqa: F401  (import for module availability)
@@ -156,12 +208,13 @@ def status(pid, *, mode='guided', db=None):
         decisions = sb['decisions']
 
         stale, reasons, mix_stale, export_stale = _replay(decisions, mode)
+        legacy = _legacy_stale_map(db, pid, clips)
 
         shot_results = []
         for s in shots:
             sid = s['shot_id']
             has_clip = sid in clips
-            is_stale = stale.get(sid, False)
+            is_stale = stale.get(sid, False) or bool(legacy.get(sid))
             has_decision = any(
                 d['node_type'] == 'shot' and d['node_id'] == sid
                 and d['action'] in _DECISION_ACTIONS and _actor_ok(mode, d['actor'])
@@ -181,7 +234,7 @@ def status(pid, *, mode='guided', db=None):
                 'seq': s['seq'],
                 'status': shot_status,
                 'ready': shot_status == 'valid' and has_decision,
-                'reasons': reasons.get(sid, []),
+                'reasons': list(reasons.get(sid, [])) + legacy.get(sid, []),
                 'decisions_required': decisions_required,
             })
 

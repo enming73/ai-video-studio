@@ -248,5 +248,8 @@ def apply(pid: str, shots: list[dict], revision: int) -> dict:
         storyboard_revisions._record_decision(db, pid, node_type='storyboard', node_id=pid,
                                               action='accept', actor='human',
                                               metadata={'shots': new_ids})
+        from . import edit_readiness
+        edit_readiness.invalidate(pid, node_type='storyboard', node_id=pid,
+                                  reason='storyboard structure changed', db=db)
 
     return guided_workflow.get(pid)

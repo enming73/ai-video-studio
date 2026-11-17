@@ -174,24 +174,55 @@ def _subtitle_filter(path):
     return "subtitles=filename='"+value+"':force_style='FontName="+font+",FontSize="+str(size)+",Outline=2,Shadow=1'"
 
 
-def export(pid, video=None, output=None, source='selected', burn_subtitles=False, ducking=False):
-    """Use an existing timeline render or build a new one; never overwrite input/output."""
+def export(pid, video=None, output=None, source='selected', burn_subtitles=False,
+           ducking=False, snapshot_id=None):
+    """Export a mixed film from a reproducible snapshot (or a legacy source).
+
+    With ``snapshot_id`` or ``source='selected'`` the audio/subtitle inputs are
+    read from a frozen snapshot manifest, never the current mutable revisions.
+    Explicit ``video`` and legacy non-selected sources keep the config/events
+    path unchanged.
+    """
     if video is not None:
         with core.connect() as db:
             if db.execute('SELECT 1 FROM guided_projects WHERE project_id=?', (pid,)).fetchone():
                 raise ValueError('External video cannot bypass guided shot confirmation')
-    duration=_duration(pid)
-    cfg=config(pid)
-    root=core.HOME/pid
-    source_video=_valid_file(video) if video else None
-    if source_video is None:
-        source_video=timeline.render(pid,source=source)
-    if abs(_probe(source_video)-duration)>0.5:
+    from . import render_snapshots
+    if video is not None or (snapshot_id is None and source != 'selected'):
+        # Legacy path: explicit video or a non-revisioned source.
+        cfg = config(pid)
+        events = audio_list(pid)
+        if video is not None:
+            source_video = _valid_file(video)
+        else:
+            source_video = timeline.render(pid, source=source)
+    else:
+        if snapshot_id is not None:
+            snap = render_snapshots.get(pid, snapshot_id)
+            if snap['status'] != 'READY':
+                raise ValueError(snap.get('error') or 'Snapshot not ready')
+        else:
+            snap = render_snapshots.create(pid)
+            snap = render_snapshots.run_and_wait(pid, snap['id'])
+            if snap['status'] != 'READY':
+                raise ValueError(snap.get('error') or 'Render failed')
+        source_video = _valid_file(snap['output'])
+        manifest = snap['manifest']
+        cfg = manifest.get('config') or {}
+        events = manifest.get('audio_events') or []
+    return _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking)
+
+
+def _mix(pid, source_video, cfg, events, output, burn_subtitles, ducking):
+    """Core FFmpeg mix from a source video, soundtrack config and audio events."""
+    duration = _duration(pid)
+    if abs(_probe(source_video) - duration) > 0.5:
         raise ValueError(f'Video duration differs from project: {source_video}')
-    out=Path(output).expanduser().resolve() if output else root/f'final-sound-{uuid.uuid4().hex[:8]}.mp4'
+    root = core.HOME / pid
+    out = Path(output).expanduser().resolve() if output else root / f'final-sound-{uuid.uuid4().hex[:8]}.mp4'
     if out.exists(): raise ValueError(f'Output exists; refusing overwrite: {out}')
-    if out==source_video: raise ValueError('Output must differ from source video')
-    out.parent.mkdir(parents=True,exist_ok=True)
+    if out == source_video: raise ValueError('Output must differ from source video')
+    out.parent.mkdir(parents=True, exist_ok=True)
     inputs=['-i',str(source_video)]
     filters=[];audio_labels=[];idx=1
     tracks={}
@@ -199,7 +230,7 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
         if not cfg.get(key): continue
         path=_valid_file(cfg[key])
         inputs+=['-stream_loop','-1' if key!='narration' else '0','-i',str(path)]
-        fade=float(cfg['fade_seconds'])
+        fade=float(cfg.get('fade_seconds', 0.0) or 0.0)
         af=f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,volume={float(cfg[gain])},atrim=duration={duration},asetpts=PTS-STARTPTS'
         if key!='narration' and fade>0:
             af+=f',afade=t=in:st=0:d={fade},afade=t=out:st={max(0,duration-fade)}:d={fade}'
@@ -211,7 +242,6 @@ def export(pid, video=None, output=None, source='selected', burn_subtitles=False
         tracks['narration']='narration_main'
         tracks['music']='music_ducked'
     audio_labels.extend(f'[{v}]' for v in tracks.values())
-    events=audio_list(pid)
     for event in events:
         path=_valid_file(event['file'])
         at=float(event['at']);length=float(event['duration'])

@@ -265,19 +265,35 @@ def start_render(pid: str, body: RenderRequest):
     checked_pid(pid)
     if body.source not in ('selected','original','i2v','mixed'):
         raise HTTPException(400,'Invalid source')
+    from . import render_snapshots
     with _render_lock:
         if any(j['status'] in ('queued','running') for j in _render_jobs.values()):
             raise HTTPException(409,'A render is already queued or running')
-        jid=uuid4().hex
+        snapshot = body.source == 'selected'
+        try:
+            jid = render_snapshots.create(pid)['id'] if snapshot else uuid4().hex
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         job={'id':jid,'project_id':pid,'status':'queued','output':None,'error':None,'created':datetime.now(timezone.utc).isoformat()}
         _render_jobs[jid]=job
     def work():
         with _render_lock: job['status']='running'
         try:
-            if body.silent_fallback and not sound._config_path(pid).is_file():
-                out=timeline.render(pid,source=body.source)
+            if snapshot:
+                result = render_snapshots.run_and_wait(pid, jid)
+                if result['status'] != 'READY':
+                    raise ValueError(result.get('error') or 'Render failed')
+                video = Path(result['output'])
+                if body.silent_fallback and not sound._config_path(pid).is_file():
+                    out = video
+                else:
+                    out = sound.export(pid, snapshot_id=jid, burn_subtitles=body.burn_subtitles,
+                                       ducking=body.ducking)
             else:
-                out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
+                if body.silent_fallback and not sound._config_path(pid).is_file():
+                    out=timeline.render(pid,source=body.source)
+                else:
+                    out=sound.export(pid,source=body.source,burn_subtitles=body.burn_subtitles,ducking=body.ducking)
             with _render_lock:
                 job['output']=str(out)
                 job['status']='completed'
@@ -293,8 +309,16 @@ def render_status(pid: str,jid: str):
     checked_pid(pid)
     with _render_lock:
         job=_render_jobs.get(jid)
-        if not job or job['project_id']!=pid: raise HTTPException(404,'Unknown render job')
-        return dict(job)
+        if job and job['project_id']==pid:
+            return dict(job)
+    from . import render_snapshots
+    try:
+        snap = render_snapshots.get(pid, jid)
+    except ValueError:
+        raise HTTPException(404,'Unknown render job')
+    status = {'PENDING':'queued','READY':'completed','FAILED':'failed'}[snap['status']]
+    return {'id':jid,'project_id':pid,'status':status,'output':snap.get('output'),
+            'error':snap.get('error'),'created':snap['created']}
 
 @app.get('/api/projects/{pid}/renders/{jid}/video')
 def render_video(pid: str,jid: str):

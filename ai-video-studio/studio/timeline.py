@@ -169,9 +169,32 @@ def current_video_clips(pid):
 
 
 def render(pid, output=None, source='selected'):
-    """Render a snapshot; never overwrite existing output or mutate original shots."""
-    if source not in ('selected','original','i2v','mixed'):
+    """Render a reproducible snapshot and return its output path.
+
+    ``source == 'selected'`` renders a frozen snapshot of the current timeline
+    revision (copy-on-write truth). The legacy non-revisioned sources
+    (``original``/``i2v``/``mixed``) keep the previous renderer. Never
+    overwrites existing output or mutates original shots.
+    """
+    if source not in ('selected', 'original', 'i2v', 'mixed'):
         raise ValueError('source must be selected, original, i2v or mixed')
+    if source != 'selected':
+        return _render_legacy(pid, output, source)
+    from . import render_snapshots
+    snap = render_snapshots.create(pid)
+    snap = render_snapshots.run_and_wait(pid, snap['id'])
+    if snap['status'] != 'READY':
+        raise ValueError(snap.get('error') or 'Render failed')
+    if output is not None:
+        target = Path(output).expanduser().resolve()
+        if target.exists():
+            raise ValueError(f'Output exists; refusing overwrite: {target}')
+        return Path(render_snapshots.reexport(pid, snap['id'], output=target)['output'])
+    return Path(snap['output'])
+
+
+def _render_legacy(pid, output, source):
+    """Legacy renderer for non-revisioned sources; never overwrite existing output."""
     core.require_ffmpeg()
     with core.connect() as db:
         migrate(db)
@@ -181,19 +204,10 @@ def render(pid, output=None, source='selected'):
         if not shots: raise ValueError('No shots')
         guided=db.execute('SELECT * FROM guided_projects WHERE project_id=?',(pid,)).fetchone()
         if guided:
-            if not guided['storyboard_confirmed'] or source != 'selected':
-                raise ValueError('Guided render requires confirmed storyboard and selected assets')
-            from . import guided_characters
-            guided_characters.require_render_ready(db, pid)
-            for s in shots:
-                approval=db.execute('''SELECT 1 FROM guided_confirmations c
-                    JOIN timeline_items t ON t.project_id=c.project_id AND t.shot_id=c.shot_id
-                    WHERE c.project_id=? AND c.shot_id=? AND c.asset_id=t.asset_id AND c.prompt=?''',
-                    (pid,s['id'],s['prompt'])).fetchone()
-                if not approval: raise ValueError('All guided shots must be confirmed before render')
+            raise ValueError('Guided render requires confirmed storyboard and selected assets')
         selected=[]
         for s in shots:
-            if source in ('selected','mixed'):
+            if source == 'mixed':
                 a=db.execute('SELECT a.* FROM timeline_items t JOIN shot_assets a ON a.id=t.asset_id WHERE t.project_id=? AND t.shot_id=?',(pid,s['id'])).fetchone()
             else:
                 a=db.execute('SELECT * FROM shot_assets WHERE shot_id=? AND source=? ORDER BY created DESC LIMIT 1',(s['id'],source)).fetchone()

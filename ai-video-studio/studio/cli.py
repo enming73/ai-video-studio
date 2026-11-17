@@ -204,6 +204,20 @@ def render_timeline_cmd(project_id: str, source: str = "selected", output: str =
         console.print(f"[red]{e}[/red]"); raise typer.Exit(1)
 
 
+@app.command("render-snapshot")
+def render_snapshot_cmd(project_id: str, timeline_revision_id: str = typer.Option(None)):
+    """Freeze a reproducible render snapshot and wait for it to complete."""
+    from . import render_snapshots
+    try:
+        snap = render_snapshots.create(project_id, timeline_revision_id=timeline_revision_id)
+        snap = render_snapshots.run_and_wait(project_id, snap['id'])
+        console.print_json(json.dumps(
+            {k: snap.get(k) for k in ('id', 'status', 'output', 'error', 'created')},
+            ensure_ascii=False))
+    except (ValueError, RuntimeError) as e:
+        console.print(f"[red]{e}[/red]"); raise typer.Exit(1)
+
+
 @app.command("soundtrack-set")
 def soundtrack_set_cmd(project_id: str, narration: str = None, music: str = None,
                        ambience: str = None, subtitles: str = None,
