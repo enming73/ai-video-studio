@@ -1,7 +1,9 @@
+import subprocess
+
 import pytest
 
 from studio import core, guided_boundaries as boundaries, guided_characters as roles
-from studio import guided_structure, guided_workflow as workflow, timeline
+from studio import guided_structure, guided_workflow as workflow, timeline, timeline_revisions
 from tests.helpers import add_version, attach_video, make_png
 
 
@@ -181,3 +183,99 @@ def test_missing_id_creates_new_shot_and_malformed_id_is_rejected(structure_proj
                                     workflow.get(pid)['revision'])
     assert len(result['shots']) == 1
     assert result['shots'][0]['id'] != old_id
+
+
+@pytest.fixture
+def renderable_guided(tmp_path, monkeypatch):
+    """A guided project with three real mock clips, selected and confirmed.
+
+    ``timeline.render(source='selected')`` works against this fixture because
+    the clips are real FFmpeg media and every shot is confirmed.
+    """
+    monkeypatch.setattr(core, 'HOME', tmp_path / 'data')
+    pid = core.create('Guided render', 20, 'mock', 0)
+    workflow.create(pid, character_stage_enabled=False)
+    state = workflow.save_draft(pid, {'character_bible': {}, 'shots': [
+        {'prompt': 'An elephant walks.', 'duration': 6, 'character_ids': []},
+        {'prompt': 'An elephant drinks.', 'duration': 6, 'character_ids': []},
+        {'prompt': 'An elephant sleeps.', 'duration': 8, 'character_ids': []}]}, 0)
+    state = workflow.confirm_storyboard(pid, state['revision'])
+    root = core.HOME / pid
+    root.mkdir(parents=True, exist_ok=True)
+    for index, shot in enumerate(workflow.get(pid)['shots'], 1):
+        path = root / f'clip-{index}.mp4'
+        subprocess.run(['ffmpeg', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+                        f'color=c=blue:s=320x180:r=24:d={shot["duration"]}',
+                        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                        str(path)], check=True)
+        asset = timeline.import_asset(pid, shot['seq'], str(path))
+        timeline.select(pid, shot['seq'], asset)
+        with core.connect() as db:
+            db.execute('INSERT OR REPLACE INTO guided_confirmations VALUES (?,?,?,?)',
+                       (pid, shot['id'], asset, shot['prompt']))
+    return pid
+
+
+def _shots_for(pid, ordered_ids, durations=None):
+    state = workflow.get(pid)
+    by_id = {s['id']: s for s in state['shots']}
+    durations = durations or {s['id']: s['duration'] for s in state['shots']}
+    return [{'id': sid, 'prompt': by_id[sid]['prompt'],
+             'duration': durations[sid], 'character_ids': []}
+            for sid in ordered_ids]
+
+
+def test_guided_reorder_derives_timeline_and_renders(renderable_guided):
+    pid = renderable_guided
+    before = timeline_revisions.current(pid)
+    order = [c['shot_id'] for c in before['video_clips']]
+    assert len(order) == 3
+    reversed_ids = list(reversed(order))
+    shots = _shots_for(pid, reversed_ids)
+    guided_structure.apply(pid, shots, workflow.get(pid)['revision'])
+    after = timeline_revisions.current(pid)
+    assert after['id'] != before['id']
+    assert [c['shot_id'] for c in after['video_clips']] == reversed_ids
+    assert [c['timeline_in_us'] for c in after['video_clips']] == [0, 8_000_000, 14_000_000]
+    assert after['duration_us'] == before['duration_us'] == 20_000_000
+    out = timeline.render(pid, source='selected')
+    assert out.is_file()
+    core.verify_video(out, 20)
+
+
+def test_guided_duration_change_resizes_clips_and_renders(renderable_guided):
+    pid = renderable_guided
+    before = timeline_revisions.current(pid)
+    order = [c['shot_id'] for c in before['video_clips']]
+    reversed_ids = list(reversed(order))
+    # Reverse order and redistribute durations (still summing to 20s): the shot
+    # that moves to the front shrinks 8 -> 4 and the one that moves to the back
+    # grows 6 -> 10, so each changed shot's neighbours also change (required to
+    # edit a shot with generated media).
+    durations = {reversed_ids[0]: 4, reversed_ids[1]: 6, reversed_ids[2]: 10}
+    shots = _shots_for(pid, reversed_ids, durations)
+    guided_structure.apply(pid, shots, workflow.get(pid)['revision'])
+    after = timeline_revisions.current(pid)
+    assert after['id'] != before['id']
+    clips = {c['shot_id']: c for c in after['video_clips']}
+    assert [c['shot_id'] for c in after['video_clips']] == reversed_ids
+    assert (clips[reversed_ids[0]]['timeline_out_us'] - clips[reversed_ids[0]]['timeline_in_us']) == 4_000_000
+    assert (clips[reversed_ids[1]]['timeline_out_us'] - clips[reversed_ids[1]]['timeline_in_us']) == 6_000_000
+    assert (clips[reversed_ids[2]]['timeline_out_us'] - clips[reversed_ids[2]]['timeline_in_us']) == 10_000_000
+    assert after['duration_us'] == 20_000_000
+    out = timeline.render(pid, source='selected')
+    assert out.is_file()
+    core.verify_video(out, 20)
+
+
+def test_guided_prompt_only_change_does_not_derive_timeline(renderable_guided):
+    pid = renderable_guided
+    before = timeline_revisions.current(pid)
+    state = workflow.get(pid)
+    # Same order and durations; only prompts change. This must not mint a new
+    # timeline revision (no order/duration change).
+    shots = [{'id': s['id'], 'prompt': s['prompt'] + ' (revised)', 'duration': s['duration'],
+              'character_ids': []} for s in state['shots']]
+    guided_structure.apply(pid, shots, state['revision'])
+    after = timeline_revisions.current(pid)
+    assert after['id'] == before['id']
